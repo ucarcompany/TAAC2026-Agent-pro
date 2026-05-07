@@ -79,6 +79,10 @@ const commands = {
     script: "scripts/data-tools.mjs",
     description: "Ingest TAAC2026 datasets and run schema-lock + leakage profiling.",
   },
+  lit: {
+    script: "scripts/lit-tools.mjs",
+    description: "Literature mining (arXiv search, ingest external papers, evidence scoring).",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);

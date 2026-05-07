@@ -21,7 +21,17 @@
 - `taac2026 data profile --dataset-id <id>`：首跑写 `schema.lock.json`；后续运行做 schema 漂移检测；用 Pearson/Spearman 双指标做 leakage 红线（阈值 0.95）。任一红线触发即 `exit 2`。
 - `.claude/skills/data-ingest/SKILL.md`、`.claude/skills/data-profile/SKILL.md`、`.claude/agents/data-auditor.md`（隔离 worktree、零 WebFetch）。
 
-### M2–M8（设计已就绪，未实现）
+### M2 — 文献挖掘 lit-mine（已落地）
+
+- `taac2026 lit search --source arxiv --query "..."`：arXiv 直连，token-bucket 限流（1 req/3s），24h 缓存。
+- `taac2026 lit ingest --source <name> --from-file <papers.json>`：接收 paper-search MCP / 外部 JSON。
+- `taac2026 lit list [--top 8] [--min-relevance 0.6]`：按 evidence_score 降序。
+- `taac2026 lit score`：重算 evidence_score。
+- 提示注入隔离：所有外部文本以 `<<<UNTRUSTED_DOC src=... sha256=...>>>` 包裹后落 `taiji-output/literature/quarantine/<source>/<id>.txt`。
+- 5 维 evidence_score：relevance / reproducibility / license_ok / latency_risk / novelty + sha256 evidence_hash。
+- `.claude/skills/lit-mine/SKILL.md`、`.claude/agents/researcher.md`（白名单 Read/Grep/Glob/WebFetch + `paper-search` MCP；禁 Edit/Write/ssh/submit）。
+
+### M3–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 
