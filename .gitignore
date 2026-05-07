@@ -1,0 +1,36 @@
+node_modules/
+package-lock.json
+*.log
+
+# Runtime artefacts under taiji-output/. The reports/ directory is tracked
+# (audit + design markdown). Everything else under taiji-output/ is ephemeral.
+taiji-output/secrets/
+taiji-output/data/
+taiji-output/profiling/
+taiji-output/runs/
+taiji-output/state/
+taiji-output/logs/
+taiji-output/code/
+taiji-output/evaluations/
+taiji-output/submit-live/
+taiji-output/browser-profile/
+taiji-output/literature/
+taiji-output/audits/
+taiji-output/errors/
+taiji-output/jobs.json
+taiji-output/all-*.csv
+taiji-output/jobs-summary.csv
+taiji-output/taiji-result.json
+taiji-output/metric-*.csv
+taiji-output/metrics-long.csv
+taiji-output/metric-summary.json
+
+# Atomic-write tmp files
+*.tmp-*
+
+# OS / editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
