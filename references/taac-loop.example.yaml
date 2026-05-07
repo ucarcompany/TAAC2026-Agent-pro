@@ -1,0 +1,57 @@
+# taac-loop.yaml v2 — example config materialised by `taac2026 loop init`.
+# See skill-expansion-design-2026-05-07.md §12 for field semantics.
+
+version: 2
+plan_id: plan-2026-05-08-001
+
+# Mutation-safety defaults. Live submit / network / quota are off until you
+# explicitly enable them. M4 (this milestone) only exercises the dry-run
+# state machine; M5 wires real SSH; M6/M7 light up submit-escalate.
+defaults:
+  enable_official_submit: false
+  daily_hard_ceiling: 0          # 0 == submit disabled
+  allow_network: false           # no lit-mine inside auto-loop
+
+loop:
+  max_iters: 12
+  schedule_window: "00:00-08:00"   # Asia/Shanghai
+  gpu_host: gpu-01.lan
+  ssh_session_reuse: true          # ControlMaster (CLAUDE.md r9)
+  metric:
+    primary: val_auc
+    threshold_delta: 0.001         # early-stop threshold
+  retry:
+    max_per_iter: 2
+  # Populated at runtime by `taac2026 loop init`. Local stub during dry-run;
+  # in M5 this becomes ~/taac-runs/<plan-id>/KILL on the GPU host.
+  kill_switch_path: null
+
+quota:
+  daily_official: 5                # platform-side official limit
+  hard_ceiling: 3                  # our own stricter ceiling
+  daily_hard_ceiling: 0            # 0 means "no submit until review-gate
+                                   # submit_token bumps it"
+
+review:
+  train_token_ttl_hours: 24
+  submit_token_ttl_hours: 2
+  hmac_secret_env: TAAC_REVIEW_HMAC_KEY
+  require_two_human_for_submit: true
+
+literature:
+  arxiv_delay_seconds: 3
+  github_per_page: 30
+  github_code_search_per_minute: 10
+  serpapi_monthly_quota_env: SERPAPI_MONTHLY_QUOTA
+  max_papers_per_proposal: 8
+  cache_ttl_hours: 24
+
+compliance:
+  non_ensemble: true
+  latency_budget_ms: 25
+  pii_scan: true
+  license_allowlist:
+    - cc-by-nc-4.0
+    - mit
+    - apache-2.0
+    - bsd-3-clause

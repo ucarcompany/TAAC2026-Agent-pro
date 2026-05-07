@@ -92,6 +92,10 @@ const commands = {
     script: "scripts/review-gate.mjs",
     description: "Issue/verify HMAC-signed train_token / submit_token under taiji-output/state/.",
   },
+  loop: {
+    script: "scripts/auto-loop.mjs",
+    description: "Auto-loop state machine (init/status/run/kill/resume). M4 dry-run; M5 real remote.",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);

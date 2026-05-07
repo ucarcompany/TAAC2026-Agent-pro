@@ -38,7 +38,15 @@
 - `bin/taac2026.mjs` 新增 review-gate 硬闸：`submit/loop --execute` 启动前自动 verify，无 token / 篡改 / 过期 / 错配立刻 exit 2。
 - `.claude/skills/algo-propose/SKILL.md` + `.claude/skills/review-gate/SKILL.md` 均 `disable-model-invocation: true`，Claude 不能自动签发；`.claude/agents/compliance-reviewer.md` model=opus，零 Bash / Edit / Write / WebFetch（提示注入彻底没有副作用面）。
 
-### M4–M8（设计已就绪，未实现）
+### M4 — auto-loop dry-run 状态机（已落地）
+
+- `taac2026 loop init|status|run|kill|resume --plan-id <id>`：状态机 `idle → planned → approved → queued → running_iter → collecting_metrics → analyzing → proposing_next → completed/paused/failed/killed`，每步 KILL 检查、最多 2 次/iter 重试、3 轮无提升早停、原子 `tmp + rename` 落盘 + `events.ndjson` 审计。
+- `taac-loop.yaml v2` 解析（`scripts/_loop-config.mjs`）+ `references/taac-loop.example.yaml`。强制安全默认：`enable_official_submit=false` / `daily_hard_ceiling=0` / `allow_network=false`。
+- `bin/taac2026.mjs` 的 `loop --execute` 走 readiness（M0）+ review-gate（M3 train_token）双闸。
+- M4 dry-run 期内的"远端 runner"是确定性 in-process stub（val_auc 单调收敛 + 有界噪声），可本地完整验证状态转换 / KILL 延迟 / retry 预算。M5 会把 stub 换成真 SSH + scp/rsync。
+- `.claude/skills/auto-loop/SKILL.md`（`disable-model-invocation: true`）+ `.claude/agents/experiment-operator.md`（M4 内禁 ssh / scp / rsync，M5 起按白名单开放）。
+
+### M5–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 

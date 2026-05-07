@@ -8,6 +8,74 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M4 (2026-05-08)
+
+### Added — auto-loop dry-run state machine
+
+- `scripts/auto-loop.mjs` (`taac2026 loop ...`):
+  - `loop init --plan-id <id> [--config <yaml>] [--gpu-host <host>]` —
+    materialises `taiji-output/state/loops/<plan-id>/loop-state.json`
+    (`state: idle`) and a fully-populated `taac-loop.yaml` v2.
+  - `loop status --plan-id <id>` — reports current state, iter history,
+    and `kill_active` flag.
+  - `loop run --plan-id <id> [--max-iters N] [--seed n] [--execute --yes]`
+    — drives the full state machine through a deterministic in-process
+    remote stub. M4 stays local; M5 will swap the stub for real SSH.
+  - `loop kill --plan-id <id>` — writes a `KILL` marker that `run` checks
+    at every phase boundary. Latency under one iteration cycle.
+  - `loop resume --plan-id <id>` — clears `KILL` and advances from
+    `paused → queued`.
+- `scripts/_loop-config.mjs` parses `taac-loop.yaml` v2 (design §12) and
+  asserts mutation-safety invariants:
+  `defaults.enable_official_submit=true` requires `daily_hard_ceiling > 0`,
+  `loop.max_iters > 0`, `compliance.license_allowlist` non-empty,
+  `compliance.latency_budget_ms > 0`.
+- State machine (`ALLOWED_TRANSITIONS`) follows design §11.1 and refuses
+  illegal jumps (e.g. `idle → running_iter`) at the source. Branches:
+  `paused`, `failed`, `killed` interrupt from any non-terminal state.
+- Retry budget per iter (`loop.retry.max_per_iter`, default 2). 3rd
+  consecutive failure → `failed` (terminal).
+- Early stop: `val_auc` improvement < `metric.threshold_delta` for 3
+  consecutive iters → `completed` (terminal).
+- Atomic state writes (`tmp + rename`); every transition appends to
+  `taiji-output/state/events.ndjson` for audit replay.
+- Deterministic in-process remote stub (`simulateIter`): `val_auc` rises
+  with `0.005 / sqrt(iter+1)` plus bounded ±0.0005 noise, seeded from
+  `(plan_id, iter, seed)`. Lets us cover state transitions / KILL latency
+  / retry budgets without a GPU.
+
+### Added — Skill / Subagent surfaces
+
+- `.claude/skills/auto-loop/SKILL.md` (`disable-model-invocation: true`)
+  — `/loop:run` is human-triggered; Claude cannot self-start training.
+- `.claude/agents/experiment-operator.md` (`model: sonnet`,
+  `tools: [Read, Glob, Grep, Bash(taac2026 loop *), Bash(taac2026 review
+  status|verify *), Bash(taac2026 propose status *)]`,
+  `disallowedTools: [Edit, Write, WebFetch, ssh, scp, rsync,
+  taac2026 submit, rm, git push|reset --hard]`). M5 will allow
+  `ssh -O check`, `scp`, `rsync` against an allow-listed GPU host.
+
+### Added — Reference
+
+- `references/taac-loop.example.yaml` — annotated v2 example users can
+  copy-paste before `loop init --config`.
+
+### Tests
+
+- `scripts/tests/loop-config.test.mjs` (7 cases): defaults applied,
+  version != 2 rejected, missing top-level rejected, mutation safety
+  invariants, license_allowlist non-empty, default round-trips.
+- `scripts/tests/auto-loop.test.mjs` (11 cases): init writes idle state,
+  KILL toggling, full-happy run, early-stop after 3 stagnant iters,
+  KILL mid-run within ≤2 extra iters, retry budget exhaustion → failed,
+  recovery from a single transient failure, dry-run does not advance,
+  paused → resume → queued, illegal `resume` from non-paused, transition
+  table sanity.
+
+All 135 tests pass; 1 skip (Windows chmod).
+
+---
+
 ## [Unreleased] — M3 (2026-05-08)
 
 ### Added — Algorithm proposal pipeline
