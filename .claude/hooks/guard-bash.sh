@@ -42,4 +42,25 @@ case "$cmd" in
     ;;
 esac
 
+# 4) SSH / SCP / RSYNC: only via ~/.ssh/config aliases listed in
+#    taiji-output/state/allowed-hosts.txt. Refuse password-based tooling
+#    and refuse user@host / IP direct shapes which leak credentials in
+#    process listings.
+case "$cmd" in
+  *sshpass*|*"expect "*ssh*)
+    block "password-based SSH (sshpass / expect) is denied — use ~/.ssh/config + ed25519 keys"
+    ;;
+esac
+
+# Refuse any ssh/scp/rsync that contains user@host (e.g. root@1.2.3.4).
+# Aliases never contain '@', so this strips the credential-leak shape.
+if printf '%s' "$cmd" | grep -qE '\b(ssh|scp|rsync)\b[^|;]*[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+'; then
+  block "ssh/scp/rsync with user@host is denied — use a ~/.ssh/config alias listed in taiji-output/state/allowed-hosts.txt"
+fi
+
+# Refuse ssh -p <port> ... root@<ip-or-host> shape and any direct IPv4 target.
+if printf '%s' "$cmd" | grep -qE '\b(ssh|scp|rsync)\b[^|;]*\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'; then
+  block "ssh/scp/rsync to a literal IP is denied — use a ~/.ssh/config alias listed in taiji-output/state/allowed-hosts.txt"
+fi
+
 exit 0

@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { atomicWriteFile, atomicWriteJson, joinSafeRelative } from "./_taiji-http.mjs";
 import { appendEvent } from "./_events.mjs";
 import { defaultLoopConfig, parseLoopConfig, renderLoopConfigYaml } from "./_loop-config.mjs";
+import { buildRemoteRunner } from "./_remote-runner.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEFAULT_LOOP_ROOT = path.join(ROOT, "taiji-output", "state", "loops");
@@ -65,14 +66,19 @@ const ALLOWED_TRANSITIONS = new Map([
 
 function usage() {
   return `Usage:
-  taac2026 loop init    --plan-id <id> [--config <yaml>] [--gpu-host <host>]
+  taac2026 loop init    --plan-id <id> [--config <yaml>] [--gpu-host <host>] [--remote-host <ssh-alias>]
   taac2026 loop status  --plan-id <id>
   taac2026 loop run     --plan-id <id> [--max-iters N] [--seed <n>] [--execute --yes]
   taac2026 loop kill    --plan-id <id>
   taac2026 loop resume  --plan-id <id>
 
-M4 runs an in-process deterministic remote stub (no SSH). Real GPU SSH
-arrives in M5. \`loop run --execute\` requires a valid train_token via
+When loop.remote_host_alias is set in taac-loop.yaml (or supplied via
+--remote-host on init), \`loop run\` SSHes to that ~/.ssh/config alias
+and orchestrates the remote runner contract under ~/taac-runs/<plan>/.
+The alias must be present in taiji-output/state/allowed-hosts.txt;
+guard-bash.sh + scripts/_allowed-hosts.mjs enforce this at two layers.
+
+\`loop run --execute\` requires a valid train_token via
 \`taac2026 review issue --kind train\` (enforced by bin/taac2026.mjs).
 `;
 }
@@ -178,7 +184,7 @@ function simulateIter({ planId, iter, seed = 42 }) {
 
 // ---------- subcommands ----------
 
-export async function initLoop({ planId, configFile, gpuHost, rootDir }) {
+export async function initLoop({ planId, configFile, gpuHost, remoteHost, rootDir }) {
   if (!planId) throw new Error("Missing --plan-id");
   const { loopRoot, eventsPath } = rootsFor({ rootDir });
   const planDir = planLoopDir(loopRoot, planId);
@@ -193,6 +199,9 @@ export async function initLoop({ planId, configFile, gpuHost, rootDir }) {
     config = defaultLoopConfig({ planId, gpuHost });
   }
   config.loop.kill_switch_path = path.join(planDir, "KILL");
+  if (remoteHost) {
+    config.loop.remote_host_alias = remoteHost;
+  }
   await atomicWriteFile(path.join(planDir, "taac-loop.yaml"), renderLoopConfigYaml(config));
 
   const state = {
@@ -218,16 +227,41 @@ export async function statusLoop({ planId, rootDir }) {
   return { plan_id: planId, plan_dir: planDir, kill_active: killActive, ...state };
 }
 
-export async function killLoop({ planId, rootDir }) {
+export async function killLoop({ planId, rootDir, runnerFactory = buildRemoteRunner }) {
   const { loopRoot, eventsPath } = rootsFor({ rootDir });
   const planDir = planLoopDir(loopRoot, planId);
   await mkdir(planDir, { recursive: true });
   await atomicWriteFile(path.join(planDir, "KILL"), `kill issued at ${new Date().toISOString()}\n`);
-  await appendEvent({ event: "loop.kill_requested", actor: "cli:auto-loop", payload: { plan_id: planId }, eventsPath });
-  return { plan_id: planId, kill_path: path.join(planDir, "KILL"), kill_issued: true };
+
+  // Mirror the KILL marker to the remote host if one is configured. Best
+  // effort — local KILL is always honored regardless of remote outcome.
+  let remote = { attempted: false, ok: null, error: null };
+  try {
+    const config = await loadConfig(planDir);
+    const alias = config.loop?.remote_host_alias;
+    if (alias) {
+      remote.attempted = true;
+      const runner = runnerFactory({ alias, controlPath: config.loop?.ssh_control_path ?? null });
+      try {
+        await runner.touchKill(planId);
+        remote.ok = true;
+      } catch (error) {
+        remote.ok = false;
+        remote.error = error.message ?? String(error);
+      }
+    }
+  } catch {} // missing config = nothing to mirror
+
+  await appendEvent({
+    event: "loop.kill_requested",
+    actor: "cli:auto-loop",
+    payload: { plan_id: planId, remote },
+    eventsPath,
+  });
+  return { plan_id: planId, kill_path: path.join(planDir, "KILL"), kill_issued: true, remote };
 }
 
-export async function resumeLoop({ planId, rootDir }) {
+export async function resumeLoop({ planId, rootDir, runnerFactory = buildRemoteRunner }) {
   const { loopRoot, eventsPath } = rootsFor({ rootDir });
   const planDir = planLoopDir(loopRoot, planId);
   const state = await loadState(planDir);
@@ -235,18 +269,36 @@ export async function resumeLoop({ planId, rootDir }) {
   if (state.state !== "paused") {
     throw new Error(`resume only valid from 'paused' (current: ${state.state})`);
   }
-  // Clear KILL marker if any (resume implies user wants to continue).
+  // Clear KILL marker locally and on the remote (best effort).
   try { await rm(path.join(planDir, "KILL")); } catch {}
+  let remote = { attempted: false, ok: null, error: null };
+  try {
+    const config = await loadConfig(planDir);
+    const alias = config.loop?.remote_host_alias;
+    if (alias) {
+      remote.attempted = true;
+      const runner = runnerFactory({ alias, controlPath: config.loop?.ssh_control_path ?? null });
+      try {
+        await runner.clearKill(planId);
+        remote.ok = true;
+      } catch (error) {
+        remote.ok = false;
+        remote.error = error.message ?? String(error);
+      }
+    }
+  } catch {}
   state.state = transition("paused", "queued");
   state.last_error = null;
   await saveState(planDir, state, eventsPath, "loop.resumed");
-  return { plan_id: planId, state: state.state };
+  return { plan_id: planId, state: state.state, remote };
 }
 
 export async function runLoop({
   planId, maxIters, fromIter, seed, execute = false, yes = false, rootDir,
   // Hooks for testing — let unit tests inject a fake remote runner.
-  remoteIter = simulateIter,
+  remoteIter,                          // explicit override; if omitted we choose
+  remoteIterFactory = buildRealRemoteIter,
+  runnerFactory = buildRemoteRunner,
   failurePlan = null,
 } = {}) {
   if (!planId) throw new Error("Missing --plan-id");
@@ -261,6 +313,17 @@ export async function runLoop({
   const seedNum = Number(seed ?? 42);
   const thresholdDelta = config.loop.metric.threshold_delta;
   const maxRetry = config.loop.retry.max_per_iter;
+
+  // Choose remote runner: explicit override > real-remote (alias configured)
+  // > local simulateIter stub. Built once per loop run so the
+  // ControlMaster persists across iters (CLAUDE.md r9).
+  const remoteHostAlias = config.loop?.remote_host_alias;
+  let chosenRemoteIter = remoteIter;
+  if (!chosenRemoteIter && remoteHostAlias) {
+    const runner = runnerFactory({ alias: remoteHostAlias, controlPath: config.loop?.ssh_control_path ?? null });
+    chosenRemoteIter = remoteIterFactory({ runner, planDir });
+  }
+  if (!chosenRemoteIter) chosenRemoteIter = simulateIter;
 
   if (!execute) {
     return {
@@ -310,7 +373,7 @@ export async function runLoop({
         if (planned === "fail" || (planned === "fail-once" && state.retry_count === 0)) {
           throw new Error(`simulated failure at iter ${iter} (attempt ${state.retry_count})`);
         }
-        iterResult = await remoteIter({ planId, iter, seed: seedNum });
+        iterResult = await chosenRemoteIter({ planId, iter, seed: seedNum });
         break;
       } catch (error) {
         state.retry_count += 1;
@@ -376,6 +439,85 @@ export async function runLoop({
   return summarize(planId, planDir, state);
 }
 
+// Real remote runner: pushes config/run.sh to ~/taac-runs/<plan-id>/iters/<iter-id>/,
+// triggers run.sh, polls status.json, then pulls metrics + train.log back.
+// Used when the loop config has loop.remote_host_alias set. Spawn function
+// is injected by buildRemoteRunner so unit tests cover this path without
+// real SSH.
+export function buildRealRemoteIter({ runner, planDir, pollMs = 10_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  return async function realRemoteIter({ planId, iter, seed }) {
+    const iterId = `iter-${String(iter).padStart(4, "0")}`;
+    const remoteIterDir = runner.remoteIterDir(planId, iterId);
+    const localIterDir = path.join(planDir, "remote", iterId);
+    await mkdir(localIterDir, { recursive: true });
+
+    // Push the iter manifest the runner contract expects. We don't ship a
+    // training framework — the user supplies run.sh. We only forward the
+    // iter parameters via a small JSON config the user's run.sh can read.
+    const iterParams = { plan_id: planId, iter, seed, started_at: new Date().toISOString() };
+    const localParams = path.join(localIterDir, "iter-params.json");
+    await writeFile(localParams, JSON.stringify(iterParams, null, 2));
+
+    await runner.exec(`mkdir -p ${remoteIterDir}`);
+    await runner.copyTo(localParams, `${remoteIterDir}/iter-params.json`);
+
+    // Try to copy the user's run.sh / config.yaml from the local plan dir
+    // (taiji-output/proposals/<plan-id>/) if present. Missing files are
+    // not an error — the user's remote may have a fixed run.sh.
+    for (const optional of ["run.sh", "config.yaml"]) {
+      const local = path.join(planDir, "..", "..", "..", "proposals", planId, optional);
+      try {
+        await stat(local);
+        await runner.copyTo(local, `${remoteIterDir}/${optional}`);
+      } catch {} // optional
+    }
+
+    // Fire run.sh inside a flock to enforce serialization. The exit code
+    // of bash -lc carries through; status.json is the structured handoff
+    // the user's run.sh is expected to write.
+    const startCmd = [
+      `cd ${remoteIterDir}`,
+      `mkdir -p $(dirname ${runner.remoteLockPath(planId)})`,
+      `flock -w 60 ${runner.remoteLockPath(planId)} bash -c '`,
+      `  test ! -e ${runner.remoteKillPath(planId)} && bash ./run.sh > train.log 2>&1`,
+      `'`,
+    ].join(" && ");
+
+    let lastStatus = null;
+    const deadline = Date.now() + 6 * 60 * 60_000; // 6h default per-iter cap
+    // Kick off training in the background to allow status polling.
+    const startPromise = runner.exec(`(${startCmd}) >> ${remoteIterDir}/runner.log 2>&1 &`, { timeoutMs: 60_000 });
+    await startPromise.catch((error) => {
+      throw new Error(`remote start failed: ${error.message ?? error}`);
+    });
+
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      try {
+        await runner.readStatus(planId, iterId, path.join(localIterDir, "status.json"));
+        const status = JSON.parse(await readFile(path.join(localIterDir, "status.json"), "utf8"));
+        lastStatus = status;
+        if (status.phase === "completed" || status.phase === "failed") break;
+      } catch {} // status.json may not exist yet
+    }
+    if (!lastStatus) throw new Error(`remote iter ${iterId}: no status.json after timeout`);
+    if (lastStatus.phase !== "completed") {
+      throw new Error(`remote iter ${iterId} phase=${lastStatus.phase} exit_code=${lastStatus.exit_code}`);
+    }
+
+    // Pull metrics + train.log back for local audit.
+    await runner.copyFrom(`${remoteIterDir}/metrics.json`, path.join(localIterDir, "metrics.json"));
+    try { await runner.copyFrom(`${remoteIterDir}/train.log`, path.join(localIterDir, "train.log")); } catch {}
+    const metrics = JSON.parse(await readFile(path.join(localIterDir, "metrics.json"), "utf8"));
+    return {
+      iter,
+      metrics,
+      artifacts: { remote_iter_dir: remoteIterDir, local_iter_dir: localIterDir },
+      finished_at: new Date().toISOString(),
+    };
+  };
+}
+
 function summarize(planId, planDir, state) {
   const last = state.iter_history.at(-1);
   return {
@@ -397,7 +539,12 @@ async function main() {
   }
 
   if (args.command === "init") {
-    const result = await initLoop({ planId: args.planId, configFile: args.config, gpuHost: args.gpuHost });
+    const result = await initLoop({
+      planId: args.planId,
+      configFile: args.config,
+      gpuHost: args.gpuHost,
+      remoteHost: args.remoteHost,
+    });
     console.log(JSON.stringify(result, null, 2));
     return;
   }

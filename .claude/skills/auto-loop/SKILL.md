@@ -69,7 +69,7 @@ idle → planned → approved → queued
 
 每一步都原子写 `loop-state.json`（`tmp + rename`），中途 Ctrl-C 不会丢前 N 轮的指标历史。
 
-> **M4 dry-run vs M5 真远端**：M4 用确定性 in-process stub 模拟 iter（val_auc 单调收敛 + bounded noise）。state machine、KILL 开关、retry 预算、原子写都按真流程跑。M5 会把 `simulateIter` 换成 `experiment-operator` subagent 通过 `scp/rsync` 拉远端 metrics。**M4 的 `--execute --yes` 不会真的 SSH 出去**。
+> **M4 dry-run vs M5 真远端**：M4 用确定性 in-process stub 模拟 iter（val_auc 单调收敛 + bounded noise）。M5 起，如果 `taac-loop.yaml` 中 `loop.remote_host_alias` 指定了 `~/.ssh/config` 里的别名，且该别名出现在 `taiji-output/state/allowed-hosts.txt`，CLI 会通过 SSH ControlMaster 单连接编排远端 runner（`~/taac-runs/<plan-id>/iters/<iter-id>/`，详见 [`references/gpu-host-setup.md`](../../references/gpu-host-setup.md)）。**绝不接受密码 / 裸 IP / `user@host`**——guard-bash.sh + `_allowed-hosts.mjs` + `RemoteRunner` 三层拦截。
 
 ### 4) 紧急停止
 

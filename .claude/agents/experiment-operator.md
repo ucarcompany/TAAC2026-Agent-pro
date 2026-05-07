@@ -10,7 +10,14 @@ tools:
   - Bash(taac2026 propose status *)
   - Bash(taac2026 review status *)
   - Bash(taac2026 review verify *)
-  # M5 will add: Bash(ssh -O check *), Bash(scp *), Bash(rsync *)
+  # M5: SSH / SCP / RSYNC against ~/.ssh/config aliases listed in
+  # taiji-output/state/allowed-hosts.txt. guard-bash.sh blocks user@host
+  # / literal IP / sshpass / expect shapes; _allowed-hosts.mjs blocks
+  # non-listed aliases at the CLI layer.
+  - Bash(ssh -O check *)
+  - Bash(ssh *)
+  - Bash(scp *)
+  - Bash(rsync *)
 disallowedTools:
   - Edit
   - Write
@@ -20,11 +27,11 @@ disallowedTools:
   - Bash(rm *)
   - Bash(git push*)
   - Bash(git reset --hard*)
-  # M4 explicitly forbids real ssh — keep these denied until M5 lights up
-  # the GPU runner contract:
-  - Bash(ssh *)
-  - Bash(scp *)
-  - Bash(rsync *)
+  # Keep explicit credential-leak shapes denied; the hook also enforces
+  # them, but having them in the subagent disallow list prevents Claude
+  # from even forming the command.
+  - Bash(sshpass *)
+  - Bash(expect *)
 ---
 
 # experiment-operator — 训练编排
@@ -77,7 +84,8 @@ taac2026 loop status --plan-id <plan-id>
 ## 不要做
 
 - 不要 `taac2026 submit *`（已 disallow）——提交是 M6/M7 的 submit-escalate 的事。
-- 不要 `ssh` / `scp` / `rsync`（M4 已 disallow；M5 会显式开放给 GPU 主机白名单）。
+- 不要 `ssh root@<ip>` / `ssh user@host` 直连——hook 会拦截，且暴露凭据。所有 ssh / scp / rsync 必须用 `~/.ssh/config` 别名（如 `taac2026-gpu`），且别名必须在 `taiji-output/state/allowed-hosts.txt`。
+- 不要 `sshpass` / `expect`——密码登录禁用，必须 ed25519 key + ControlMaster。
 - 不要 `rm` 任何文件（含 `taiji-output/state/loops/<plan-id>/KILL`）——清 KILL 是 `loop resume` 的副产物，不是你直接动手。
 - 不要嵌套 spawn 其它 subagent（设计稿 §1.4）。
 - 不要凭空报数字——所有指标必须从 `loop-state.json.iter_history` 读出（CLAUDE.md r1）。

@@ -46,7 +46,17 @@
 - M4 dry-run 期内的"远端 runner"是确定性 in-process stub（val_auc 单调收敛 + 有界噪声），可本地完整验证状态转换 / KILL 延迟 / retry 预算。M5 会把 stub 换成真 SSH + scp/rsync。
 - `.claude/skills/auto-loop/SKILL.md`（`disable-model-invocation: true`）+ `.claude/agents/experiment-operator.md`（M4 内禁 ssh / scp / rsync，M5 起按白名单开放）。
 
-### M5–M8（设计已就绪，未实现）
+### M5 — auto-loop 真远端 SSH（已落地）
+
+- `scripts/_remote-runner.mjs` + `scripts/_allowed-hosts.mjs`：通过 `~/.ssh/config` 别名连接，强制 `BatchMode=yes` + `ControlMaster=auto` + `ControlPersist=10m`（CLAUDE.md r9 SSH 节流）。
+- `taac2026 loop init --remote-host <alias>` 在 `taac-loop.yaml` 写 `loop.remote_host_alias`；`loop run` 自动选择 real-remote iter（`realRemoteIter`）or 本地 stub。
+- 远端 runner 契约（设计稿 §11.2）：`~/taac-runs/<plan-id>/iters/<iter-id>/{iter-params.json, run.sh, metrics.json, status.json, train.log}` + 顶层 `KILL` + `gpu.lock`。
+- `loop kill` / `loop resume` 双向同步 KILL 文件；远端失败不阻塞本地停机。
+- 三层凭据防护：`scripts/_allowed-hosts.mjs` host 别名白名单 + `RemoteRunner` 拒 `user@host` / 裸 IP / `sshpass`/`expect` + `.claude/hooks/guard-bash.sh` PreToolUse 三独立兜底。
+- `.claude/agents/experiment-operator.md` M5 起允许 ssh/scp/rsync（但仍禁 `sshpass`/`expect` 与直连 user@host 形态）。
+- 新增 [`references/gpu-host-setup.md`](references/gpu-host-setup.md) 用户上手指南（密钥生成 + 禁密码 + ssh config + 白名单 + `run.sh` 契约 + 端到端验证 + 失陷响应）。
+
+### M6–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 

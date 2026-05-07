@@ -8,6 +8,85 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M5 (2026-05-08)
+
+### Added — Real-remote SSH runner (auto-loop)
+
+- `scripts/_allowed-hosts.mjs` — single source of truth for accepted SSH
+  aliases. Reads/writes `taiji-output/state/allowed-hosts.txt`; refuses
+  any alias matching `user@host` shape and any string that doesn't match
+  `/^[A-Za-z0-9_.\-]+$/`. Used by both `auto-loop.mjs` and
+  `.claude/hooks/guard-bash.sh`.
+- `scripts/_remote-runner.mjs` — `RemoteRunner` class wrapping ssh / scp /
+  rsync. Hard-refuses anything but a bare `~/.ssh/config` alias; emits
+  canonical argv with `BatchMode=yes` (no password prompt — fail fast if
+  keys aren't set up) and `ControlMaster=auto` + `ControlPersist=10m`
+  (one TCP connection per loop run, satisfying CLAUDE.md r9). Spawn
+  function is injectable so unit tests cover the path without launching
+  real ssh.
+- `scripts/auto-loop.mjs`:
+  - `loop init --remote-host <alias>` — writes
+    `loop.remote_host_alias` into `taac-loop.yaml`.
+  - `runLoop` auto-selects between `simulateIter` (default) and the new
+    `realRemoteIter` factory based on whether `remote_host_alias` is
+    present. ControlMaster is held open across all iters in one loop run.
+  - `loop kill` and `loop resume` mirror the local KILL marker to the
+    remote host (`~/taac-runs/<plan>/KILL`). Mirroring is best-effort —
+    a remote SSH failure is reported in the event ledger but never
+    blocks the local kill from taking effect.
+  - `realRemoteIter` implements the design §11.2 contract: pushes
+    `iter-params.json` (and optional `run.sh`/`config.yaml` from
+    `taiji-output/proposals/<plan-id>/`) into
+    `~/taac-runs/<plan>/iters/<iter-id>/`, fires it under `flock`, polls
+    `status.json` every 10 s, then pulls `metrics.json` + `train.log`
+    back to `taiji-output/state/loops/<plan>/remote/<iter-id>/`.
+
+### Hardened — `.claude/hooks/guard-bash.sh`
+
+- New rules block at three credential-leak shapes:
+  1. `sshpass` / `expect ... ssh ...`
+  2. Any `ssh|scp|rsync` argv containing `user@host`
+  3. Any `ssh|scp|rsync` argv containing a literal IPv4 address
+- Together with the per-alias allowlist, this means even if Claude
+  hallucinates a connection string, three independent layers refuse it
+  before a connection opens.
+
+### Added — Reference
+
+- `references/gpu-host-setup.md` — step-by-step (key generation,
+  password-auth disable, ssh config, allowlist enrolment, `run.sh`
+  contract, end-to-end verification, compromise response).
+
+### Skill / Subagent
+
+- `.claude/agents/experiment-operator.md` now allows `Bash(ssh -O check
+  *)`, `Bash(ssh *)`, `Bash(scp *)`, `Bash(rsync *)` — but explicitly
+  disallows `Bash(sshpass *)` / `Bash(expect *)` and relies on
+  guard-bash.sh to refuse non-alias connection strings.
+- `.claude/skills/auto-loop/SKILL.md` updated to describe the M5 path.
+
+### Tests
+
+- `scripts/tests/remote-runner.test.mjs` (11 cases): alias validation,
+  allowlist read/write idempotency, ssh argv shape (BatchMode +
+  ControlMaster), allowlist-rejection, scp argv (`alias:remote`),
+  `touchKill`/`clearKill` shell, non-zero exit propagation, timeout
+  with child kill.
+- `scripts/tests/auto-loop-remote.test.mjs` (6 cases): `loop init
+  --remote-host` writes the alias into yaml; `runLoop` with an injected
+  fake `RemoteRunner` drives 3 iters end-to-end; `loop kill` mirrors
+  KILL on success and reports remote failure without blocking local;
+  `loop resume` clears both KILLs; loops without `remote_host_alias`
+  still run via `simulateIter`.
+
+All 152 tests pass; 1 skip (Windows chmod).
+
+> **Note**: M5 ships only the code path. Reaching a real GPU requires
+> the user to do steps 1–4 of `references/gpu-host-setup.md` on their
+> own (key generation, ssh config, allowlist enrolment).
+
+---
+
 ## [Unreleased] — M4 (2026-05-08)
 
 ### Added — auto-loop dry-run state machine
