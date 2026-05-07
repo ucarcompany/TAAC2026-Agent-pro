@@ -1,0 +1,4 @@
+interface:
+  display_name: "TAAC2026 CLI"
+  short_description: "Scrape, compare, archive, and submit TAAC / Taiji experiments."
+  default_prompt: "Use TAAC2026 CLI to scrape Taiji training metrics, compare configs, archive logs/code, or prepare a safe submit bundle."

@@ -1,0 +1,25 @@
+{
+  "name": "taac2026-cli",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Agent-friendly TAAC2026 / Taiji experiment CLI for metrics, logs, config diffs, and safe submits.",
+  "type": "module",
+  "bin": {
+    "taac2026": "./bin/taac2026.mjs"
+  },
+  "scripts": {
+    "cli": "node bin/taac2026.mjs",
+    "scrape": "node scripts/scrape-taiji.mjs",
+    "scrape:all": "node scripts/scrape-taiji.mjs --all",
+    "diff:config": "node scripts/compare-config-yaml.mjs",
+    "prepare:submit": "node scripts/prepare-taiji-submit.mjs",
+    "submit": "node scripts/submit-taiji.mjs",
+    "test": "node --test scripts/tests/*.test.mjs",
+    "check": "node --check bin/taac2026.mjs && node --check scripts/scrape-taiji.mjs && node --check scripts/compare-config-yaml.mjs && node --check scripts/prepare-taiji-submit.mjs && node --check scripts/submit-taiji.mjs && node --check scripts/experiment-tools.mjs && node --check scripts/evaluation-tools.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "playwright": "^1.52.0",
+    "cos-nodejs-sdk-v5": "^2.15.4"
+  }
+}

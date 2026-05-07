@@ -1,0 +1,16 @@
+# Example config only. Replace every field with your real experiment settings.
+experiment:
+  name: minimal_example
+  seed: 2026
+
+data:
+  train_path_env: TRAIN_DATA_PATH
+  valid_path_env: VALID_DATA_PATH
+
+training:
+  epochs: 1
+  batch_size: 128
+  learning_rate: 0.001
+
+output:
+  dir: outputs/minimal_example
