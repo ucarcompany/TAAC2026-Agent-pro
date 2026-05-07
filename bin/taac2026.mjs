@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadReadinessOrExit } from "../scripts/readiness.mjs";
+import { verify as verifyReviewToken } from "../scripts/review-gate.mjs";
 
 const rootDir = fileURLToPath(new URL("..", import.meta.url));
 
@@ -83,6 +84,14 @@ const commands = {
     script: "scripts/lit-tools.mjs",
     description: "Literature mining (arXiv search, ingest external papers, evidence scoring).",
   },
+  propose: {
+    script: "scripts/proposal-tools.mjs",
+    description: "Init/validate/freeze an algorithm proposal (7 sections + 3 SHA256 + ≥3 evidence).",
+  },
+  review: {
+    script: "scripts/review-gate.mjs",
+    description: "Issue/verify HMAC-signed train_token / submit_token under taiji-output/state/.",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);
@@ -112,7 +121,7 @@ Run 'taac2026 <command> --help' for command-specific options.`;
 }
 
 // Stage-0 hard gate: refuse to launch high-risk live actions before
-// readiness=ready. Bypassable only by clearing TAAC2026_BYPASS_READINESS=1
+// readiness=ready. Bypassable only by setting TAAC2026_BYPASS_READINESS=1
 // (used by the readiness check itself / unit tests).
 async function enforceReadinessGate(commandName, args) {
   if (process.env.TAAC2026_BYPASS_READINESS === "1") return;
@@ -124,6 +133,26 @@ async function enforceReadinessGate(commandName, args) {
   console.error(`Readiness gate is "${report.status}". Run \`taac2026 readiness check\` first.`);
   if (report.blockers.length) console.error(`  blockers: ${report.blockers.join(", ")}`);
   console.error(`  expected report: ${report.reportPath}`);
+  process.exitCode = 2;
+  process.exit(2);
+}
+
+// Review-gate hard gate: a fresh signed token must be present before any
+// live submit/loop action. Mirrors guard-bash.sh's PreToolUse check, but
+// runs even when Claude is not in the loop (e.g. CI).
+async function enforceReviewGate(commandName, args) {
+  if (process.env.TAAC2026_BYPASS_REVIEW_GATE === "1") return;
+  if (!args.includes("--execute")) return;
+  let kind;
+  if (commandName === "submit") kind = "submit";
+  else if (commandName === "loop") kind = "train";
+  else return;
+
+  const result = await verifyReviewToken({ kind });
+  if (result.ok) return;
+  console.error(`review-gate: refused to run \`${commandName} --execute\`: ${result.reason}`);
+  console.error(`  token expected at: ${result.target}`);
+  console.error(`  Issue with: \`taac2026 review issue --kind ${kind} --plan-id <id> --approver <name> --execute --yes\``);
   process.exitCode = 2;
   process.exit(2);
 }
@@ -144,6 +173,7 @@ async function run() {
   }
 
   await enforceReadinessGate(commandName, args);
+  await enforceReviewGate(commandName, args);
 
   const routedArgs =
     commandName === "submit" && submitHelperActions.has(args[0])

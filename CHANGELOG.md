@@ -8,6 +8,74 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M3 (2026-05-08)
+
+### Added — Algorithm proposal pipeline
+
+- `scripts/proposal-tools.mjs` (`taac2026 propose ...`):
+  - `propose init --plan-id <id> [--data-id <id>] [--latency-budget-ms 25] [--max-iters 12]`
+    scaffolds a 7-section markdown proposal at
+    `taiji-output/proposals/<plan-id>/proposal.md` and records the
+    initial `data_manifest_sha256` / `research_index_sha256` references.
+  - `propose validate --plan-id <id>` enforces every gate before freeze:
+    all 7 sections present, no `TODO` placeholders, both referenced
+    SHA256s match the on-disk artefacts, `index.jsonl` contains ≥3
+    entries with `evidence_score.relevance >= 0.6`, `non_ensemble_ack:
+    true` and `latency_budget_ms: \`<n>\`` literally present.
+  - `propose freeze --plan-id <id> --execute --yes` writes
+    `proposal.json` (machine-readable, `proposal_sha256` included) and
+    advances the state machine `draft → reviewed_by_compliance`.
+  - `propose status --plan-id <id>` reports the current state + history.
+  - State file (`state.json`) is written via `tmp + rename` atomic.
+
+### Added — Review gate (HMAC-signed train/submit tokens)
+
+- `scripts/_hmac.mjs` — canonical-JSON HMAC-SHA256 sign/verify with
+  TTL handling and `timingSafeEqual` comparisons.
+- `scripts/review-gate.mjs` (`taac2026 review ...`):
+  - `review issue --kind <train|submit> --plan-id <id> --approver <name>
+    [--ttl-hours <n>] --execute --yes` signs and writes
+    `taiji-output/state/.review-token-{train,submit}` (default TTL 24h
+    for train, 2h for submit).
+  - `review verify --kind <train|submit> [--token-file <p>] [--plan-id
+    <id>]` enforces HMAC + TTL + kind/plan_id match. Exits 2 on any
+    mismatch.
+  - `review status [--plan-id <id>]` reports both token slots.
+- `submit_token` issuance requires the `TAAC2026_SECOND_APPROVER` env
+  var (the second human approver — design §10).
+- `bin/taac2026.mjs::enforceReviewGate` is a new hard gate that blocks
+  `submit/loop --execute` unless the corresponding token verifies. Can
+  be temporarily bypassed for unit tests via `TAAC2026_BYPASS_REVIEW_GATE=1`.
+
+### Added — Skill / Subagent surfaces
+
+- `.claude/skills/algo-propose/SKILL.md` (`disable-model-invocation: true`)
+  — Claude cannot self-invoke proposal authoring; humans drive `/algo:propose`.
+- `.claude/skills/review-gate/SKILL.md` (`disable-model-invocation: true`)
+  — Claude cannot mint review tokens; humans must run `taac2026 review issue`.
+- `.claude/agents/compliance-reviewer.md` (`model: opus`,
+  `tools: [Read, Grep, Glob]`, `disallowedTools: [Bash, Edit, Write,
+  WebFetch]`) — the zero-tool reviewer is intentionally unable to be
+  prompt-injected into running shell commands.
+
+### Tests
+
+- `scripts/tests/hmac.test.mjs` — 8 cases (canonical JSON ordering,
+  deterministic signing, tamper / TTL / wrong-key / non-hex rejections,
+  payload validation).
+- `scripts/tests/proposal.test.mjs` — 6 cases (scaffold sections,
+  TODO placeholder rejection, insufficient-evidence rejection, fully
+  filled proposal passes, freeze writes proposal.json + advances state,
+  freeze refuses on validation failure).
+- `scripts/tests/review-gate.test.mjs` — 11 cases (issue dry-run,
+  round-trip verify, kind cross-use rejection, plan_id mismatch
+  rejection, tamper rejection, submit double-approval requirement,
+  missing key / malformed key rejections, status, missing-token reason).
+
+All 117 tests pass; 1 skip (Windows chmod).
+
+---
+
 ## [Unreleased] — M2 (2026-05-08)
 
 ### Added — Literature mining

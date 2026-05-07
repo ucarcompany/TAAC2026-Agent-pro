@@ -31,7 +31,14 @@
 - 5 维 evidence_score：relevance / reproducibility / license_ok / latency_risk / novelty + sha256 evidence_hash。
 - `.claude/skills/lit-mine/SKILL.md`、`.claude/agents/researcher.md`（白名单 Read/Grep/Glob/WebFetch + `paper-search` MCP；禁 Edit/Write/ssh/submit）。
 
-### M3–M8（设计已就绪，未实现）
+### M3 — algo-propose + review-gate 双 HMAC token（已落地）
+
+- `taac2026 propose init|validate|freeze|status --plan-id <id>`：7 节模板 + 3 SHA256 + ≥3 evidence ≥0.6 + non_ensemble_ack + latency_budget_ms 强制校验；freeze 推状态机 `draft → reviewed_by_compliance`。
+- `taac2026 review issue|verify|status --kind train|submit --plan-id <id>`：HMAC-SHA256 签名（canonical JSON + `timingSafeEqual`）、TTL（train 24h / submit 2h）、kind/plan_id 双匹配；submit 强制双人审批（`TAAC2026_SECOND_APPROVER` 环境变量）。
+- `bin/taac2026.mjs` 新增 review-gate 硬闸：`submit/loop --execute` 启动前自动 verify，无 token / 篡改 / 过期 / 错配立刻 exit 2。
+- `.claude/skills/algo-propose/SKILL.md` + `.claude/skills/review-gate/SKILL.md` 均 `disable-model-invocation: true`，Claude 不能自动签发；`.claude/agents/compliance-reviewer.md` model=opus，零 Bash / Edit / Write / WebFetch（提示注入彻底没有副作用面）。
+
+### M4–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 
