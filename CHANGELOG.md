@@ -8,6 +8,47 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M7 (2026-05-08)
+
+### Added — submit-escalate live submission
+
+Implements milestone M7 of skill-expansion-design-2026-05-07.md §14.
+The submit-escalate state machine now extends past `submit_dry_run_
+verified` into a real `submitted` state by spawning `evaluation-tools
+.mjs eval create --execute --yes`. The created evaluation task feeds
+the official `algo.qq.com/leaderboard` once Taiji finishes scoring it.
+
+scripts/submit-escalate.mjs:
+- New 6th gate `submit` (state: `submit_dry_run_verified → submitted`).
+- `initEscalation` now accepts `--submit-kind evaluation` (default,
+  the only kind in M7), `--model-id`, `--creator`, `--inference-bundle`,
+  `--cookie-file`, `--eval-name`. All persist to quota-state.json so
+  later `advance` calls can use them without re-passing.
+- `runSubmitGate` validates inputs (model-id / inference-bundle /
+  cookie-file / supported submit-kind), spawns evaluation-tools, parses
+  the JSON response, extracts the eval task id, atomically increments
+  `taiji-output/state/quota-state.json::daily_official_used[today]`,
+  and writes the submission payload (eval_task_id, eval_name, model_id,
+  daily_official_used_today, submitted_at) onto the plan's state.
+- `submission` field on the plan's quota-state.json now holds the
+  successful submission's payload — surfaceable via `submit-escalate
+  status` or directly readable for downstream scoring.
+
+Skill update:
+- `.claude/skills/submit-escalate/SKILL.md` documents the new init
+  fields, the live `submit` gate, and the post-submission checks
+  (leaderboard URL + eval scrape command).
+
+Tests (8 new, total 233 pass / 2 skip):
+- `submit-m7.test.mjs`: init persists submitKind/modelId/cookieFile/
+  evalName / default kind is "evaluation" / fail-fast on missing
+  model-id/inference-bundle/cookie-file / refuses unknown submit_kind /
+  daily_official_used increments to 1 on success.
+- Updated existing `submit-escalate.test.mjs` to acknowledge the new
+  6th gate (walk all 6, then assert `next_gate=null`).
+
+---
+
 ## [Unreleased] — M8 (2026-05-08)
 
 ### Added — error-doctor + KB pipeline

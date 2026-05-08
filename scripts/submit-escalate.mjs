@@ -23,6 +23,7 @@
 // dropped to taiji-output/state/submits/<plan-id>/decisions/<gate>-<ts>.json
 // for offline audit and reproducibility.
 
+import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,18 +36,23 @@ import {
   checkLocalGate,
   checkQuotaGate,
   checkSubmitDryRun,
+  todayLocal,
 } from "./_compliance.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEFAULT_SUBMITS_ROOT = path.join(ROOT, "taiji-output", "state", "submits");
+const DEFAULT_QUOTA_STATE_PATH = path.join(ROOT, "taiji-output", "state", "quota-state.json");
 
 // Ordered list of (gate name, target state). advance walks this in order.
+// `submit` is the M7 step that actually calls the official Taiji evaluation
+// API (feeding algo.qq.com/leaderboard). All earlier gates are local checks.
 export const GATE_ORDER = [
   { name: "local_gate",      to: "local_gate_passed" },
   { name: "compliance_gate", to: "compliance_gate_passed" },
   { name: "quota_gate",      to: "quota_available" },
   { name: "human_approval",  to: "human_second_approved" },
   { name: "submit_dry_run",  to: "submit_dry_run_verified" },
+  { name: "submit",          to: "submitted" },
 ];
 
 export const STATES = [
@@ -68,14 +74,22 @@ function usage() {
   return `Usage:
   taac2026 submit-escalate init     --plan-id <id> --candidate-bundle <dir>
                                     --template-job-internal-id <id>
-                                    [--latency-budget-ms 25]
-                                    [--daily-hard-ceiling 1]
+                                    [--latency-budget-ms 25] [--daily-hard-ceiling 1]
+                                    [--submit-kind evaluation] [--model-id <id>]
+                                    [--creator <ams_id>] [--inference-bundle <dir>]
+                                    [--cookie-file <path>] [--eval-name <name>]
   taac2026 submit-escalate status   --plan-id <id>
   taac2026 submit-escalate advance  --plan-id <id> [--gate <name>] --execute --yes
   taac2026 submit-escalate reset    --plan-id <id> [--to <state>] --execute --yes
 
 Gate order (must be advanced sequentially):
-  local_gate → compliance_gate → quota_gate → human_approval → submit_dry_run
+  local_gate → compliance_gate → quota_gate → human_approval
+            → submit_dry_run → submit
+
+The first 5 gates are local. The 6th gate (\`submit\`) actually creates a
+Taiji evaluation task — its score lands on https://algo.qq.com/leaderboard.
+\`submit\` requires --model-id, --inference-bundle, --cookie-file at init
+time (or before \`advance --gate submit\`).
 
 \`advance\` without --gate runs the next pending gate. With --gate, it
 runs that specific gate (must be the next pending one). Each gate must
@@ -146,6 +160,106 @@ async function recordDecision(planDirAbs, gateName, decision) {
   return filePath;
 }
 
+// Atomically increment daily_official_used[today] in the global
+// quota-state.json. Called only after the live `submit` gate succeeds.
+async function incrementDailyOfficialUsed({ rootDir }) {
+  const quotaPath = rootDir
+    ? path.join(rootDir, "taiji-output", "state", "quota-state.json")
+    : DEFAULT_QUOTA_STATE_PATH;
+  let quota = {};
+  try { quota = JSON.parse(await readFile(quotaPath, "utf8")); } catch {}
+  const day = todayLocal();
+  quota.daily_official_used = quota.daily_official_used ?? {};
+  quota.daily_official_used[day] = (quota.daily_official_used[day] ?? 0) + 1;
+  quota.last_submitted_at = new Date().toISOString();
+  await mkdir(path.dirname(quotaPath), { recursive: true });
+  await atomicWriteJson(quotaPath, quota);
+  return { day, count: quota.daily_official_used[day] };
+}
+
+// M7 live submit. Spawns evaluation-tools.mjs eval create --execute --yes
+// using fields stored at init time. Returns a uniform gate decision; on
+// PASS, writes the submission response into state.submission and bumps
+// the global daily counter.
+//
+// spawnFn is injectable so tests can verify command shape without
+// hitting the network. Tests typically pass a fake that returns a
+// canned eval-create response.
+async function runSubmitGate({ state, rootDir, spawnFn = spawn, scriptOverride } = {}) {
+  if (state.submit_kind !== "evaluation") {
+    return { passed: false, evidence: { submit_kind: state.submit_kind }, reason: `submit_kind '${state.submit_kind}' is not implemented in M7 (only 'evaluation' is)` };
+  }
+  if (!state.model_id) return { passed: false, evidence: null, reason: "init was missing --model-id (required for submit_kind=evaluation)" };
+  if (!state.inference_bundle) return { passed: false, evidence: null, reason: "init was missing --inference-bundle" };
+  if (!state.cookie_file) return { passed: false, evidence: null, reason: "init was missing --cookie-file (required for live submit)" };
+
+  const repoRoot = rootDir ?? ROOT;
+  const evalScript = scriptOverride ?? path.join(repoRoot, "scripts", "evaluation-tools.mjs");
+  const args = [
+    evalScript,
+    "eval", "create",
+    "--model-id", String(state.model_id),
+    "--file-dir", state.inference_bundle,
+    "--cookie-file", state.cookie_file,
+    "--include-all-files",  // submit-escalate ships exactly the bundle the user prepared
+    "--execute", "--yes",
+    "--json",
+  ];
+  if (state.creator) args.push("--creator", String(state.creator));
+  if (state.eval_name) args.push("--name", String(state.eval_name));
+
+  const result = await new Promise((resolve) => {
+    const child = spawnFn(process.execPath, args, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5 * 60_000);
+    child.stdout?.on?.("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr?.on?.("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: stderr + (error.message ?? String(error)) }); });
+  });
+
+  if (result.code !== 0) {
+    return { passed: false, evidence: { exit_code: result.code, stdout_tail: result.stdout.slice(-800), stderr_tail: result.stderr.slice(-800) }, reason: `evaluation-tools exited with code ${result.code}` };
+  }
+
+  // Parse the response. evaluation-tools.mjs eval create writes a pretty
+  // JSON report to stdout (potentially preceded by other log lines). Find
+  // the longest run of lines that parse as a single JSON object.
+  let report;
+  try {
+    const stdout = result.stdout.trim();
+    // Try whole stdout first.
+    try { report = JSON.parse(stdout); }
+    catch {
+      // Find the first '{' and try parsing from there.
+      const firstBrace = stdout.indexOf("{");
+      if (firstBrace < 0) throw new Error("no JSON object in stdout");
+      report = JSON.parse(stdout.slice(firstBrace));
+    }
+  } catch (error) {
+    return { passed: false, evidence: { stdout_tail: result.stdout.slice(-800) }, reason: `could not parse eval-create JSON: ${error.message}` };
+  }
+  const evalTaskId = report?.response?.id ?? report?.response?.task_id ?? null;
+  if (!evalTaskId) {
+    return { passed: false, evidence: { report_keys: Object.keys(report ?? {}), response_keys: Object.keys(report?.response ?? {}) }, reason: "eval create succeeded but response had no id/task_id" };
+  }
+
+  const counter = await incrementDailyOfficialUsed({ rootDir });
+  return {
+    passed: true,
+    evidence: {
+      submit_kind: "evaluation",
+      eval_task_id: evalTaskId,
+      eval_name: report?.body?.name ?? state.eval_name ?? null,
+      model_id: state.model_id,
+      creator: state.creator ?? null,
+      daily_official_used_today: counter.count,
+      submitted_at: new Date().toISOString(),
+    },
+  };
+}
+
 function nextPendingGate(state) {
   // Find the gate whose target state immediately follows state.state.
   const currentIdx = STATE_INDEX.get(state.state) ?? -1;
@@ -158,6 +272,15 @@ function nextPendingGate(state) {
 export async function initEscalation({
   planId, candidateBundle, templateJobInternalId, latencyBudgetMs = 25,
   dailyHardCeiling = 1, rootDir,
+  // M7 — fields needed for the live `submit` gate (eval-create against
+  // taiji.algo.qq.com → algo.qq.com leaderboard). All optional at init
+  // time; the `submit` gate validates them at advance time.
+  submitKind = "evaluation",
+  modelId = null,
+  creator = null,
+  inferenceBundle = null,
+  cookieFile = null,
+  evalName = null,
 }) {
   if (!planId) throw new Error("Missing --plan-id");
   if (!candidateBundle) throw new Error("Missing --candidate-bundle");
@@ -174,6 +297,13 @@ export async function initEscalation({
     template_job_internal_id: String(templateJobInternalId),
     latency_budget_ms: Number(latencyBudgetMs),
     daily_hard_ceiling: Number(dailyHardCeiling),
+    submit_kind: existing?.submit_kind ?? submitKind,
+    model_id: modelId ?? existing?.model_id ?? null,
+    creator: creator ?? existing?.creator ?? null,
+    inference_bundle: inferenceBundle ? path.resolve(inferenceBundle) : (existing?.inference_bundle ?? null),
+    cookie_file: cookieFile ? path.resolve(cookieFile) : (existing?.cookie_file ?? null),
+    eval_name: evalName ?? existing?.eval_name ?? null,
+    submission: existing?.submission ?? null,  // populated by `submit` gate on success
     initialised_at: existing?.initialised_at ?? new Date().toISOString(),
     history: existing?.history ?? [],
     gate_results: existing?.gate_results ?? Object.fromEntries(GATE_ORDER.map((g) => [g.name, null])),
@@ -215,6 +345,7 @@ export async function advanceEscalation({
     quota_gate:      () => checkQuotaGate({ rootDir, dailyHardCeiling: state.daily_hard_ceiling }),
     human_approval:  () => checkHumanApprovalGate({ planId, rootDir }),
     submit_dry_run:  () => checkSubmitDryRun({ candidateBundle: state.candidate_bundle, templateJobInternalId: state.template_job_internal_id, rootDir }),
+    submit:          () => runSubmitGate({ state, rootDir }),
   };
 
   if (!execute) {
@@ -236,6 +367,12 @@ export async function advanceEscalation({
   if (decision.passed) {
     state.history = [...(state.history ?? []), { ts: new Date().toISOString(), from: state.state, to: next.to, gate: next.name }];
     state.state = next.to;
+    // M7: when the live `submit` gate passes, persist the submission
+    // payload (eval_task_id etc.) at the top level so users / Skills can
+    // surface it without parsing per-gate decisions.
+    if (next.name === "submit" && decision.evidence) {
+      state.submission = { ...decision.evidence };
+    }
     await saveState(planDirAbs, state, eventsPath, "submit_escalate.gate.passed");
   } else {
     await saveState(planDirAbs, state, eventsPath, "submit_escalate.gate.failed");
@@ -287,6 +424,12 @@ async function main() {
       templateJobInternalId: args.templateJobInternalId,
       latencyBudgetMs: args.latencyBudgetMs,
       dailyHardCeiling: args.dailyHardCeiling,
+      submitKind: args.submitKind,
+      modelId: args.modelId,
+      creator: args.creator,
+      inferenceBundle: args.inferenceBundle,
+      cookieFile: args.cookieFile,
+      evalName: args.evalName,
     });
     console.log(JSON.stringify(result, null, 2));
     return;

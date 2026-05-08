@@ -25,6 +25,18 @@ const ALL_PASS = {
   quota_gate:      PASS("quota_gate"),
   human_approval:  PASS("human_approval"),
   submit_dry_run:  PASS("submit_dry_run"),
+  // M7: the live `submit` gate is mocked to return a successful eval-create.
+  submit:          async () => ({
+    passed: true,
+    evidence: {
+      submit_kind: "evaluation",
+      eval_task_id: 99999,
+      eval_name: "mocked-eval",
+      model_id: "29132",
+      daily_official_used_today: 1,
+      submitted_at: new Date().toISOString(),
+    },
+  }),
 };
 
 test("init creates state file with state=candidate and gate_results sketched", async () => {
@@ -42,7 +54,7 @@ test("init creates state file with state=candidate and gate_results sketched", a
   for (const g of GATES) assert.equal(status.gate_results[g.name], null);
 });
 
-test("advance walks all 5 gates in order to submit_dry_run_verified", async () => {
+test("advance walks the first 5 (M6) gates to submit_dry_run_verified, with `submit` queued next", async () => {
   const root = await makeRoot();
   await initEscalation({ planId: "p-2", candidateBundle: path.join(root, "b"), templateJobInternalId: "1", rootDir: root });
   for (let step = 0; step < 5; step += 1) {
@@ -51,7 +63,24 @@ test("advance walks all 5 gates in order to submit_dry_run_verified", async () =
   }
   const status = await statusEscalation({ planId: "p-2", rootDir: root });
   assert.equal(status.state, "submit_dry_run_verified");
-  assert.equal(status.next_gate, null); // M6 stops here; M7 picks up "submitted"
+  assert.equal(status.next_gate, "submit"); // M7 — live submission to algo.qq.com
+});
+
+test("M7 advance to submit lands state=submitted and persists submission payload", async () => {
+  const root = await makeRoot();
+  await initEscalation({
+    planId: "p-m7", candidateBundle: path.join(root, "b"), templateJobInternalId: "1",
+    submitKind: "evaluation", modelId: "29132", inferenceBundle: path.join(root, "infer"),
+    cookieFile: path.join(root, "cookie.txt"), evalName: "test-eval", rootDir: root,
+  });
+  for (let step = 0; step < 6; step += 1) {
+    const r = await advanceEscalation({ planId: "p-m7", rootDir: root, execute: true, yes: true, gateRunners: ALL_PASS });
+    assert.equal(r.passed, true, `step ${step} failed`);
+  }
+  const status = await statusEscalation({ planId: "p-m7", rootDir: root });
+  assert.equal(status.state, "submitted");
+  assert.equal(status.submission.eval_task_id, 99999);
+  assert.equal(status.submission.model_id, "29132");
 });
 
 test("advance dry-run does NOT change state", async () => {
@@ -141,14 +170,18 @@ test("reset to an unknown state is rejected", async () => {
   );
 });
 
-test("once submit_dry_run_verified, advance reports no further M6 gates", async () => {
+test("once submitted (last M7 gate passes), advance reports no further gates", async () => {
   const root = await makeRoot();
-  await initEscalation({ planId: "p-tail", candidateBundle: path.join(root, "b"), templateJobInternalId: "1", rootDir: root });
-  for (let i = 0; i < 5; i += 1) {
+  await initEscalation({
+    planId: "p-tail", candidateBundle: path.join(root, "b"), templateJobInternalId: "1",
+    submitKind: "evaluation", modelId: "29132", inferenceBundle: path.join(root, "infer"),
+    cookieFile: path.join(root, "cookie.txt"), rootDir: root,
+  });
+  for (let i = 0; i < 6; i += 1) {
     await advanceEscalation({ planId: "p-tail", rootDir: root, execute: true, yes: true, gateRunners: ALL_PASS });
   }
   const r = await advanceEscalation({ planId: "p-tail", rootDir: root, execute: true, yes: true, gateRunners: ALL_PASS });
-  assert.equal(r.state, "submit_dry_run_verified");
+  assert.equal(r.state, "submitted");
   assert.match(r.message, /no further gates/);
 });
 
