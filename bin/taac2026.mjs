@@ -100,6 +100,10 @@ const commands = {
     script: "scripts/hosts-tools.mjs",
     description: "Manage SSH host aliases and stored passwords ($HOME/.taac2026/host-passwords/).",
   },
+  "submit-escalate": {
+    script: "scripts/submit-escalate.mjs",
+    description: "Quota state machine: candidate → local/compliance/quota/human/dry-run gates → submitted (M7).",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);

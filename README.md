@@ -66,7 +66,19 @@
 - `references/gpu-host-setup.md` §9 给出完整的密码模式手把手指南。
 - 适用场景：短期 GPU 租赁（几天）+ 平台无 SSH key UI。**长期生产仍建议默认 key 模式**。
 
-### M6–M8（设计已就绪，未实现）
+### M6 — submit-escalate dry-run + quota-escalator（已落地）
+
+- 状态机 `candidate → local_gate_passed → compliance_gate_passed → quota_available → human_second_approved → submit_dry_run_verified`，**不可跳级**，每个 advance 单步、必显式 `--execute --yes`。
+- 5 道闸语义（`scripts/_compliance.mjs`）：
+  - `local_gate`：`val_auc` 提升 ≥ threshold_delta；
+  - `compliance_gate`：3 SHA256 一致 + 反 ensemble 关键字 grep（10 项 keyword）+ latency p95 ≤ budget + license 白名单 + leakage red flags == []；
+  - `quota_gate`：今日 daily_official_used < daily_hard_ceiling（默认 0 = M7 禁用）；
+  - `human_approval`：M3 `submit_token` 验证 + 双人审批字段 (`+human:`)；
+  - `submit_dry_run`：调 `submit-taiji.mjs` 不带 `--execute`，exit 0 才过。
+- 状态文件：`taiji-output/state/submits/<plan-id>/{quota-state.json, decisions/<gate>-<ts>.json}` + `events.ndjson` append。
+- `.claude/skills/submit-escalate/SKILL.md`（`disable-model-invocation: true`）。
+
+### M7–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 

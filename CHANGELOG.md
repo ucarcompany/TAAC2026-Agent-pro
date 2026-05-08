@@ -8,6 +8,87 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M6 (2026-05-08)
+
+### Added — submit-escalate dry-run state machine
+
+Implements milestone M6 of skill-expansion-design-2026-05-07.md §14.
+The state machine takes a candidate submit-bundle through five gates
+to `submit_dry_run_verified`. M7 will pick up at `submitted` (the real
+official-API call).
+
+State machine (linear, no skipping):
+
+```
+candidate
+  → local_gate_passed
+  → compliance_gate_passed
+  → quota_available
+  → human_second_approved
+  → submit_dry_run_verified
+```
+
+CLI surface (`scripts/submit-escalate.mjs`):
+- `submit-escalate init  --plan-id <id> --candidate-bundle <dir>
+                          --template-job-internal-id <id>
+                          [--latency-budget-ms 25] [--daily-hard-ceiling 1]`
+- `submit-escalate status --plan-id <id>` — reports current state,
+  per-gate results, history, and the next pending gate.
+- `submit-escalate advance --plan-id <id> [--gate <name>] --execute --yes`
+  — runs the next pending gate. With `--gate`, the supplied name must
+  equal the next pending gate (no skipping). FAIL leaves state
+  unchanged but writes the decision to the audit trail.
+- `submit-escalate reset --plan-id <id> --to <state> --execute --yes`
+  — clears `gate_results` strictly past the target state.
+
+Per-gate semantics (`scripts/_compliance.mjs`):
+- `local_gate`: last iter's `val_auc` ≥ max of prior 3 iters +
+  threshold_delta (multi-seed 95% CI is flagged as TODO for
+  design R13).
+- `compliance_gate`: 3 SHA256 (proposal.md, data manifest, lit
+  index.jsonl) match disk; ensemble keyword grep over the candidate
+  bundle (10-keyword list: StackingClassifier / VotingRegressor /
+  BlendEnsemble / xgb_lgb_blend / model_avg / etc.); latency p95 ≤
+  budget when present in metrics; license in allowlist
+  (cc-by-nc-4.0 / cc-by-4.0 / mit / apache-2.0 / bsd-3-clause);
+  data-profile `leakage_red_flags == []`.
+- `quota_gate`: `daily_official_used[today] < daily_hard_ceiling`.
+  Default ceiling 0 means "M7 is disabled until you raise it"; M6
+  dry-run never consumes quota.
+- `human_approval`: existing `.review-token-submit` HMAC-verifies
+  (M3); kind=submit; plan_id matches; approver field contains
+  `+human:` (i.e. two named approvers). Single-approver tokens fail.
+- `submit_dry_run`: spawns `node scripts/submit-taiji.mjs --bundle
+  <b> --template-job-internal-id <id>` (no `--execute`) and asserts
+  exit 0.
+
+State storage:
+- `taiji-output/state/submits/<plan-id>/quota-state.json` — atomic
+  `tmp + rename` per state change.
+- `taiji-output/state/submits/<plan-id>/decisions/<gate>-<ts>.json`
+  — one per advance attempt (PASS or FAIL).
+- `taiji-output/state/events.ndjson` — append-only event ledger gets
+  `submit_escalate.init` / `submit_escalate.gate.passed` /
+  `submit_escalate.gate.failed` / `submit_escalate.reset` events.
+
+Skill / Subagent surfaces:
+- `.claude/skills/submit-escalate/SKILL.md` (`disable-model-invocation:
+  true`) — Claude cannot self-advance; humans drive
+  `/submit:escalate`.
+
+Tests (25 new): `compliance.test.mjs` (13 cases — local gate
+pass/fail, compliance pass / ensemble grep / SHA256 drift / leakage
+red flag, quota pass/fail, human-approval pass / single-approver
+reject / plan-id mismatch reject, submit-dry-run shape, ENSEMBLE
+keyword sanity); `submit-escalate.test.mjs` (12 cases — init / full
+walk / dry-run inertia / wrong-gate rejection / mid-failure
+preservation / decisions log / --yes enforcement / reset / unknown
+reset target / past-tail advance / re-init keeps state).
+
+All 194 tests pass; 2 skip (Windows chmod).
+
+---
+
 ## [Unreleased] — M5.5 (2026-05-08)
 
 ### Added — Password-based remote auth (for transient GPU rentals)
