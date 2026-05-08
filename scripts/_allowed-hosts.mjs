@@ -24,6 +24,7 @@ export function isValidAlias(alias) {
   if (typeof alias !== "string") return false;
   if (!ALIAS_REGEX.test(alias)) return false;
   if (alias.includes("@")) return false; // user@host shape forbidden
+  if (alias === "." || alias === "..") return false; // path-traversal segments
   return true;
 }
 

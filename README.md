@@ -56,6 +56,16 @@
 - `.claude/agents/experiment-operator.md` M5 起允许 ssh/scp/rsync（但仍禁 `sshpass`/`expect` 与直连 user@host 形态）。
 - 新增 [`references/gpu-host-setup.md`](references/gpu-host-setup.md) 用户上手指南（密钥生成 + 禁密码 + ssh config + 白名单 + `run.sh` 契约 + 端到端验证 + 失陷响应）。
 
+### M5.5 — 密码登录路径（无 SSH key 管理界面时的临时方案，已落地）
+
+- `taac2026 hosts set-password --alias <name> [--password <str>] [--from-stdin]`：把密码存到 `$HOME/.taac2026/host-passwords/<alias>`（**外置于仓库**，chmod 600，绝不进 git/scp/argv）。
+- `taac2026 hosts list/has-password/remove-password/allow`。
+- `taac-loop.yaml v2.1` 新增 `loop.remote_auth: "key"|"password"`（默认 `key`）；`taac2026 loop init --remote-auth password` 切换。
+- `RemoteRunner` 新增 `useStoredPassword` 选项，password 模式下走 OpenSSH 原生 `SSH_ASKPASS`（**不**用 sshpass），密码只在 askpass helper stdout 出现一次后即被 ssh 消费。
+- `scripts/_askpass.{cmd,sh,mjs}`：跨平台 askpass helper（Windows 用 .cmd，POSIX 用 .sh）。
+- `references/gpu-host-setup.md` §9 给出完整的密码模式手把手指南。
+- 适用场景：短期 GPU 租赁（几天）+ 平台无 SSH key UI。**长期生产仍建议默认 key 模式**。
+
 ### M6–M8（设计已就绪，未实现）
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。

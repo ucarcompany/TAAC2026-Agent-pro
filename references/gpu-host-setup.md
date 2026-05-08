@@ -148,7 +148,100 @@ taac2026 loop run --plan-id plan-2026-05-08-001 --execute --yes
 - `taac2026 loop resume --plan-id <id>` — clears both KILLs and advances
   the state machine from `paused → queued`.
 
-## 9. What to do if your remote becomes untrusted
+## 9. Password-only fallback (M5.5, 没有 SSH key 管理界面时)
+
+部分 GPU 租赁平台（如 Compshare）**不提供** SSH 公钥管理界面，且每次实例都
+是临时容器（几天就退）。这种场景把 ed25519 key 推到容器里没意义（容器一关
+key 就没了），不如直接用密码登录。但密码**绝对不能**进 git 或上传到 GPU。
+
+M5.5 的设计：
+
+```
+你的本机 ($HOME/.taac2026/host-passwords/<alias>, chmod 600)
+    │
+    │  taac2026 hosts set-password --alias <alias>
+    ▼
+本机 OpenSSH ─── via SSH_ASKPASS=_askpass.{cmd,sh} ───► 远端 sshd
+    │                                                       ▲
+    │  taac2026 loop run (远端 runner 调度)                │
+    └──────────────── ssh / scp / rsync ────────────────────┘
+```
+
+密码**只**在本机存在，**永远**不进入：
+
+- argv（`ps`/`tasklist` 看不到，因为我们不用 sshpass）
+- 环境变量（除了一个 `TAAC2026_HOST_ALIAS=<alias>` 标记，本身不含密码）
+- TAAC2026-Agent-pro 仓库或 git 历史
+- taiji-output/（被 .gitignore 屏蔽，且密码也不存这里）
+- 任何 scp/rsync 上行流量
+
+### 步骤
+
+1. **本机存密码**（一次，交互式或 AI 调用）：
+   ```bash
+   # 交互式（隐藏输入）
+   taac2026 hosts set-password --alias taac2026-gpu
+
+   # 自动化（推荐 AI 用）
+   taac2026 hosts set-password --alias taac2026-gpu --password "your-password-here"
+
+   # 从 stdin（适合 CI 拿密钥管理服务密码后管道传入）
+   echo "your-password-here" | taac2026 hosts set-password --alias taac2026-gpu --from-stdin
+   ```
+
+   文件落到 `$HOME/.taac2026/host-passwords/taac2026-gpu`（chmod 600）。
+
+2. **本机加 alias 到允许列表**：
+   ```bash
+   taac2026 hosts allow --alias taac2026-gpu
+   ```
+
+3. **本机 `~/.ssh/config` 简化版**（不需要 IdentityFile）：
+   ```sshconfig
+   Host taac2026-gpu
+       HostName 117.50.48.78
+       Port 22
+       User root
+       PreferredAuthentications password
+       PubkeyAuthentication no
+       StrictHostKeyChecking accept-new
+       UserKnownHostsFile ~/.ssh/known_hosts_taac2026
+   ```
+
+   `PubkeyAuthentication no` 让 ssh 不浪费时间试 key；`UserKnownHostsFile`
+   单独存一份，避免和你已有的 known_hosts 混淆。
+
+4. **初始化 loop 时声明 password 模式**：
+   ```bash
+   taac2026 loop init --plan-id plan-001 \
+     --remote-host taac2026-gpu \
+     --remote-auth password
+   ```
+
+   这会在 `taac-loop.yaml` 里写 `loop.remote_auth: password`。
+
+5. **跑**（其它跟 key 模式一样）：
+   ```bash
+   taac2026 review issue --kind train --plan-id plan-001 --approver alice --execute --yes
+   taac2026 loop run    --plan-id plan-001 --execute --yes
+   ```
+
+   `RemoteRunner` 会自动设 `SSH_ASKPASS`/`SSH_ASKPASS_REQUIRE=force`/
+   `TAAC2026_HOST_ALIAS=taac2026-gpu`，OpenSSH 调用 askpass helper，
+   helper 读你本机 `~/.taac2026/host-passwords/taac2026-gpu` 文件，把密码
+   送给 ssh。整个过程**不**用 sshpass、**不**经过环境变量、**不**进 argv。
+
+### 限制
+
+- 这个模式适合**临时**场景（几天租用、没 key 管理）。**长期**生产环境仍建议
+  用 ed25519 key（`--remote-auth key` 是默认值）。
+- Windows 原生 OpenSSH 对 `SSH_ASKPASS_REQUIRE=force` 在 8.1 之前不支持；
+  2020 年后的 Windows 11 / Win10 21H1+ 都自带 OpenSSH ≥ 8.1，所以一般 OK。
+  如果你的 ssh 版本特别老，跑 `ssh -V` 看到 `< 8.1` 时升级 OpenSSH。
+- 容器重启后远端环境会重置（但 `~/.taac2026/host-passwords/` 是**本机**的，
+  不受影响——你只需要确认新容器的 IP/端口仍能映射回这个 alias）。
+
+## 10. What to do if your remote becomes untrusted
 
 If you suspect the GPU host or its credentials have been compromised:
 

@@ -66,7 +66,8 @@ const ALLOWED_TRANSITIONS = new Map([
 
 function usage() {
   return `Usage:
-  taac2026 loop init    --plan-id <id> [--config <yaml>] [--gpu-host <host>] [--remote-host <ssh-alias>]
+  taac2026 loop init    --plan-id <id> [--config <yaml>] [--gpu-host <host>]
+                                       [--remote-host <ssh-alias>] [--remote-auth key|password]
   taac2026 loop status  --plan-id <id>
   taac2026 loop run     --plan-id <id> [--max-iters N] [--seed <n>] [--execute --yes]
   taac2026 loop kill    --plan-id <id>
@@ -77,6 +78,12 @@ When loop.remote_host_alias is set in taac-loop.yaml (or supplied via
 and orchestrates the remote runner contract under ~/taac-runs/<plan>/.
 The alias must be present in taiji-output/state/allowed-hosts.txt;
 guard-bash.sh + scripts/_allowed-hosts.mjs enforce this at two layers.
+
+\`--remote-auth password\` uses a password stored under
+$HOME/.taac2026/host-passwords/<alias> (set with
+\`taac2026 hosts set-password\`). The password file lives outside the
+repo, is never copied to the remote, and never enters argv / env. SSH
+itself receives it via the SSH_ASKPASS helper.
 
 \`loop run --execute\` requires a valid train_token via
 \`taac2026 review issue --kind train\` (enforced by bin/taac2026.mjs).
@@ -184,7 +191,7 @@ function simulateIter({ planId, iter, seed = 42 }) {
 
 // ---------- subcommands ----------
 
-export async function initLoop({ planId, configFile, gpuHost, remoteHost, rootDir }) {
+export async function initLoop({ planId, configFile, gpuHost, remoteHost, remoteAuth, rootDir }) {
   if (!planId) throw new Error("Missing --plan-id");
   const { loopRoot, eventsPath } = rootsFor({ rootDir });
   const planDir = planLoopDir(loopRoot, planId);
@@ -201,6 +208,12 @@ export async function initLoop({ planId, configFile, gpuHost, remoteHost, rootDi
   config.loop.kill_switch_path = path.join(planDir, "KILL");
   if (remoteHost) {
     config.loop.remote_host_alias = remoteHost;
+  }
+  if (remoteAuth) {
+    if (remoteAuth !== "key" && remoteAuth !== "password") {
+      throw new Error(`--remote-auth must be 'key' or 'password' (got ${remoteAuth})`);
+    }
+    config.loop.remote_auth = remoteAuth;
   }
   await atomicWriteFile(path.join(planDir, "taac-loop.yaml"), renderLoopConfigYaml(config));
 
@@ -241,7 +254,11 @@ export async function killLoop({ planId, rootDir, runnerFactory = buildRemoteRun
     const alias = config.loop?.remote_host_alias;
     if (alias) {
       remote.attempted = true;
-      const runner = runnerFactory({ alias, controlPath: config.loop?.ssh_control_path ?? null });
+      const runner = runnerFactory({
+        alias,
+        controlPath: config.loop?.ssh_control_path ?? null,
+        useStoredPassword: config.loop?.remote_auth === "password",
+      });
       try {
         await runner.touchKill(planId);
         remote.ok = true;
@@ -277,7 +294,11 @@ export async function resumeLoop({ planId, rootDir, runnerFactory = buildRemoteR
     const alias = config.loop?.remote_host_alias;
     if (alias) {
       remote.attempted = true;
-      const runner = runnerFactory({ alias, controlPath: config.loop?.ssh_control_path ?? null });
+      const runner = runnerFactory({
+        alias,
+        controlPath: config.loop?.ssh_control_path ?? null,
+        useStoredPassword: config.loop?.remote_auth === "password",
+      });
       try {
         await runner.clearKill(planId);
         remote.ok = true;
@@ -318,9 +339,14 @@ export async function runLoop({
   // > local simulateIter stub. Built once per loop run so the
   // ControlMaster persists across iters (CLAUDE.md r9).
   const remoteHostAlias = config.loop?.remote_host_alias;
+  const useStoredPassword = config.loop?.remote_auth === "password";
   let chosenRemoteIter = remoteIter;
   if (!chosenRemoteIter && remoteHostAlias) {
-    const runner = runnerFactory({ alias: remoteHostAlias, controlPath: config.loop?.ssh_control_path ?? null });
+    const runner = runnerFactory({
+      alias: remoteHostAlias,
+      controlPath: config.loop?.ssh_control_path ?? null,
+      useStoredPassword,
+    });
     chosenRemoteIter = remoteIterFactory({ runner, planDir });
   }
   if (!chosenRemoteIter) chosenRemoteIter = simulateIter;
@@ -544,6 +570,7 @@ async function main() {
       configFile: args.config,
       gpuHost: args.gpuHost,
       remoteHost: args.remoteHost,
+      remoteAuth: args.remoteAuth,
     });
     console.log(JSON.stringify(result, null, 2));
     return;

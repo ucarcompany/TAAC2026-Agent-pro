@@ -96,6 +96,10 @@ const commands = {
     script: "scripts/auto-loop.mjs",
     description: "Auto-loop state machine (init/status/run/kill/resume). M4 dry-run; M5 real remote.",
   },
+  hosts: {
+    script: "scripts/hosts-tools.mjs",
+    description: "Manage SSH host aliases and stored passwords ($HOME/.taac2026/host-passwords/).",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);

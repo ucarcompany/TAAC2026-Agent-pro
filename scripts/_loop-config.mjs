@@ -22,6 +22,7 @@ const DEFAULTS = Object.freeze({
     metric: { primary: "val_auc", threshold_delta: 0.001 },
     retry: { max_per_iter: 2 },
     kill_switch_path: null,           // populated at runtime
+    remote_auth: "key",                // "key" | "password" (M5.5)
   },
   quota: {
     daily_official: 5,
@@ -99,6 +100,9 @@ export function parseLoopConfig(text) {
   }
   if (typeof merged.compliance?.latency_budget_ms !== "number" || merged.compliance.latency_budget_ms <= 0) {
     throw new Error("compliance.latency_budget_ms must be a positive number");
+  }
+  if (merged.loop.remote_auth !== "key" && merged.loop.remote_auth !== "password") {
+    throw new Error(`loop.remote_auth must be 'key' or 'password' (got ${JSON.stringify(merged.loop.remote_auth)})`);
   }
 
   return merged;

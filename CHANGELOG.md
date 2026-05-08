@@ -8,6 +8,95 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M5.5 (2026-05-08)
+
+### Added — Password-based remote auth (for transient GPU rentals)
+
+Some GPU rental platforms (e.g. Compshare) don't expose an SSH-key
+management UI, and instances are short-lived containers where pushing
+a key into the rootfs has no value (it's gone on next restart). For
+these cases M5.5 adds a password path that:
+
+- Stores the password **outside the repo** at
+  `$HOME/.taac2026/host-passwords/<alias>` (`chmod 0o600` on POSIX).
+- Never copies the password to the GPU.
+- Never puts the password in `argv` (no sshpass), env (only an alias
+  *name* is exported), or any tracked file.
+- Uses OpenSSH's built-in `SSH_ASKPASS` mechanism — the askpass helper
+  is `scripts/_askpass.{cmd,sh}` which dispatches to `_askpass.mjs`,
+  reads the alias from `TAAC2026_HOST_ALIAS`, looks up the local
+  password file, and prints it to stdout. Stderr stays empty so the
+  password never leaks into shell history or CI logs.
+
+New CLI:
+- `taac2026 hosts set-password --alias <name> [--password <str>]
+  [--from-stdin]` — interactive hidden prompt or non-interactive
+  `--password` / piped stdin (the latter two enable AI-driven
+  autonomous setup).
+- `taac2026 hosts has-password --alias <name>` — exit 0 / 1.
+- `taac2026 hosts list` — list aliases with stored passwords + the
+  current ssh allowlist.
+- `taac2026 hosts remove-password --alias <name> --execute --yes`.
+- `taac2026 hosts allow --alias <name>` — append to
+  `taiji-output/state/allowed-hosts.txt`.
+
+`scripts/_remote-runner.mjs`:
+- New `useStoredPassword: boolean` constructor option. When true:
+  drops `BatchMode=yes` from ssh / scp argv (incompatible with askpass)
+  and injects `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY`,
+  `TAAC2026_HOST_ALIAS` into the spawned env. Existing behaviour is
+  unchanged when the option is absent or false.
+- New `StrictHostKeyChecking=accept-new` option in both modes — auto-
+  trust on first connect, then refuse if the key changes.
+- Exposes `buildAskpassEnv` so tests (and external code paths) can
+  verify the env shape without spawning real ssh.
+
+`scripts/_loop-config.mjs`:
+- New `loop.remote_auth: "key" | "password"` field in `taac-loop.yaml`
+  v2 (default `"key"`). Validation rejects any other value.
+
+`scripts/auto-loop.mjs`:
+- `loop init --remote-auth password` writes the field.
+- `runLoop` / `killLoop` / `resumeLoop` thread `useStoredPassword`
+  through to every `RemoteRunner` they construct so KILL mirroring +
+  iteration both work in password mode.
+
+`_allowed-hosts.mjs::isValidAlias` now also rejects `.` and `..` — the
+regex previously allowed them as path-traversal vectors against the
+host-password store. Caught by a new test rather than in the wild.
+
+### Reference
+
+- `references/gpu-host-setup.md` §9 — full step-by-step for password
+  mode (when to use, simplified `~/.ssh/config`, `--remote-auth password`
+  flag, and the limitation that `SSH_ASKPASS_REQUIRE=force` needs
+  OpenSSH ≥ 8.1).
+
+### Tests (18 new)
+
+- `scripts/tests/host-password.test.mjs` (11 cases): store path is
+  outside the repo; round-trip set/get; null on absent alias;
+  has/remove/list semantics; alias validation rejects `root@host`,
+  whitespace, `..`; refuses empty password; POSIX `0o600` mode;
+  trailing-newline strip on read.
+- `scripts/tests/remote-runner-password.test.mjs` (7 cases):
+  `buildAskpassEnv` returns null when password mode off; injects all
+  four env vars when on; preserves existing `DISPLAY`; ssh / scp argv
+  drop `BatchMode=yes` only in password mode; `StrictHostKeyChecking=
+  accept-new` is set in both modes.
+
+All 169 tests pass; 2 skip (Windows chmod).
+
+> **Security trade-off (explicitly requested)**: this milestone trades
+> some defense-in-depth (key auth) for autonomous-loop convenience on
+> short-lived rental hosts. The constraint that **passwords never enter
+> git** is enforced by storing under `$HOME` and by the existing
+> `.gitignore` rules (which already exclude any path under
+> `taiji-output/`). On a long-lived production host, key auth
+> (`--remote-auth key`, the default) remains the recommended mode.
+
+---
+
 ## [Unreleased] — M5 (2026-05-08)
 
 ### Added — Real-remote SSH runner (auto-loop)

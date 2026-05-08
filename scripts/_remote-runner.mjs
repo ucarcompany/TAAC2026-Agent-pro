@@ -13,14 +13,20 @@
 import { spawn as defaultSpawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { assertHostAllowed, isValidAlias } from "./_allowed-hosts.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-function runProcess(spawnFn, command, args, { timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) {
+const SCRIPTS_DIR = fileURLToPath(new URL(".", import.meta.url));
+const ASKPASS_PATH = process.platform === "win32"
+  ? path.join(SCRIPTS_DIR, "_askpass.cmd")
+  : path.join(SCRIPTS_DIR, "_askpass.sh");
+
+function runProcess(spawnFn, command, args, { timeoutMs = DEFAULT_TIMEOUT_MS, input, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnFn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawnFn(command, args, { stdio: ["pipe", "pipe", "pipe"], env });
     let stdout = "";
     let stderr = "";
     let timer = null;
@@ -58,16 +64,23 @@ function runProcess(spawnFn, command, args, { timeoutMs = DEFAULT_TIMEOUT_MS, in
   });
 }
 
-// Build the canonical ssh argv for an alias. We always pass -o
+// Build the canonical ssh argv for an alias. By default we pass -o
 // BatchMode=yes (no password prompt — fail fast if keys aren't set up)
 // and -o ControlMaster=auto -o ControlPersist=10m so multiple commands
 // in one loop run share a single TCP connection (CLAUDE.md r9).
-function sshBaseArgs(alias, controlPath) {
-  const args = [
-    "-o", "BatchMode=yes",
+//
+// When `useStoredPassword` is on we drop BatchMode (incompatible with
+// SSH_ASKPASS) and rely on the askpass helper + SSH_ASKPASS_REQUIRE=force
+// to fetch the password from $HOME/.taac2026/host-passwords/<alias>
+// without prompting the user.
+function sshBaseArgs(alias, controlPath, { useStoredPassword = false } = {}) {
+  const args = [];
+  if (!useStoredPassword) args.push("-o", "BatchMode=yes");
+  args.push(
     "-o", "ServerAliveInterval=30",
     "-o", "ServerAliveCountMax=3",
-  ];
+    "-o", "StrictHostKeyChecking=accept-new",
+  );
   if (controlPath) {
     args.push(
       "-o", "ControlMaster=auto",
@@ -79,10 +92,10 @@ function sshBaseArgs(alias, controlPath) {
   return args;
 }
 
-function scpBaseArgs(controlPath) {
-  const args = [
-    "-o", "BatchMode=yes",
-  ];
+function scpBaseArgs(controlPath, { useStoredPassword = false } = {}) {
+  const args = [];
+  if (!useStoredPassword) args.push("-o", "BatchMode=yes");
+  args.push("-o", "StrictHostKeyChecking=accept-new");
   if (controlPath) {
     args.push(
       "-o", "ControlMaster=auto",
@@ -93,8 +106,30 @@ function scpBaseArgs(controlPath) {
   return args;
 }
 
+// Build the env vars that drive SSH_ASKPASS-based password retrieval.
+// When useStoredPassword is false we return null so the spawn inherits
+// the ambient environment.
+export function buildAskpassEnv({ alias, useStoredPassword, baseEnv = process.env }) {
+  if (!useStoredPassword) return null;
+  return {
+    ...baseEnv,
+    SSH_ASKPASS: ASKPASS_PATH,
+    SSH_ASKPASS_REQUIRE: "force",
+    DISPLAY: baseEnv.DISPLAY ?? ":0",
+    TAAC2026_HOST_ALIAS: alias,
+  };
+}
+
 export class RemoteRunner {
-  constructor({ alias, controlPath, spawnFn = defaultSpawn, timeoutMs = DEFAULT_TIMEOUT_MS, allowlistPath } = {}) {
+  constructor({
+    alias,
+    controlPath,
+    spawnFn = defaultSpawn,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    allowlistPath,
+    useStoredPassword = false,
+    baseEnv = process.env,
+  } = {}) {
     if (!isValidAlias(alias)) {
       throw new Error(`RemoteRunner: invalid alias '${alias}'. Must match /^[A-Za-z0-9_.\-]+$/ and contain no '@'.`);
     }
@@ -103,7 +138,13 @@ export class RemoteRunner {
     this.spawnFn = spawnFn;
     this.timeoutMs = timeoutMs;
     this.allowlistPath = allowlistPath;
+    this.useStoredPassword = Boolean(useStoredPassword);
+    this.baseEnv = baseEnv;
     this._verified = false;
+  }
+
+  _spawnEnv() {
+    return buildAskpassEnv({ alias: this.alias, useStoredPassword: this.useStoredPassword, baseEnv: this.baseEnv });
   }
 
   async _ensureAllowed() {
@@ -117,59 +158,61 @@ export class RemoteRunner {
   // '"'"' trick. Caller should still avoid passing untrusted text.
   async exec(remoteCommand, { timeoutMs } = {}) {
     await this._ensureAllowed();
-    const args = sshBaseArgs(this.alias, this.controlPath);
+    const args = sshBaseArgs(this.alias, this.controlPath, { useStoredPassword: this.useStoredPassword });
     const escaped = `'${String(remoteCommand).replaceAll("'", "'\"'\"'")}'`;
     args.push("--", "bash", "-lc", escaped);
-    return await runProcess(this.spawnFn, "ssh", args, { timeoutMs: timeoutMs ?? this.timeoutMs });
+    return await runProcess(this.spawnFn, "ssh", args, { timeoutMs: timeoutMs ?? this.timeoutMs, env: this._spawnEnv() });
   }
 
   // Push a local file to <alias>:<remotePath>. Uses scp; for directories
   // call copyTreeTo instead.
   async copyTo(localPath, remotePath, { timeoutMs } = {}) {
     await this._ensureAllowed();
-    const args = scpBaseArgs(this.controlPath);
+    const args = scpBaseArgs(this.controlPath, { useStoredPassword: this.useStoredPassword });
     args.push(localPath, `${this.alias}:${remotePath}`);
-    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs });
+    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs, env: this._spawnEnv() });
   }
 
   async copyFrom(remotePath, localPath, { timeoutMs } = {}) {
     await this._ensureAllowed();
-    const args = scpBaseArgs(this.controlPath);
+    const args = scpBaseArgs(this.controlPath, { useStoredPassword: this.useStoredPassword });
     args.push(`${this.alias}:${remotePath}`, localPath);
-    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs });
+    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs, env: this._spawnEnv() });
   }
 
   async copyTreeTo(localDir, remoteDir, { timeoutMs } = {}) {
     await this._ensureAllowed();
-    const args = scpBaseArgs(this.controlPath);
+    const args = scpBaseArgs(this.controlPath, { useStoredPassword: this.useStoredPassword });
     args.push("-r", localDir, `${this.alias}:${remoteDir}`);
-    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs });
+    return await runProcess(this.spawnFn, "scp", args, { timeoutMs: timeoutMs ?? this.timeoutMs, env: this._spawnEnv() });
   }
 
   async syncFrom(remoteDir, localDir, { timeoutMs } = {}) {
     await this._ensureAllowed();
     await mkdir(localDir, { recursive: true });
+    const sshOptParts = [];
+    if (!this.useStoredPassword) sshOptParts.push("-o BatchMode=yes");
+    sshOptParts.push("-o StrictHostKeyChecking=accept-new");
+    if (this.controlPath) sshOptParts.push(`-o ControlPath=${this.controlPath}`);
     const args = [
       "-az",
       "--delete",
       "-e",
-      this.controlPath
-        ? `ssh -o BatchMode=yes -o ControlPath=${this.controlPath}`
-        : "ssh -o BatchMode=yes",
+      `ssh ${sshOptParts.join(" ")}`,
       `${this.alias}:${remoteDir.replace(/\/?$/, "/")}`,
       localDir.replace(/\/?$/, "/"),
     ];
-    return await runProcess(this.spawnFn, "rsync", args, { timeoutMs: timeoutMs ?? this.timeoutMs });
+    return await runProcess(this.spawnFn, "rsync", args, { timeoutMs: timeoutMs ?? this.timeoutMs, env: this._spawnEnv() });
   }
 
   // Verify the persistent control connection is alive without sending any
   // command. Returns true if the master is up. Wraps `ssh -O check`.
   async checkControlMaster() {
     await this._ensureAllowed();
-    const args = sshBaseArgs(this.alias, this.controlPath);
+    const args = sshBaseArgs(this.alias, this.controlPath, { useStoredPassword: this.useStoredPassword });
     args.splice(args.indexOf(this.alias), 0, "-O", "check");
     try {
-      await runProcess(this.spawnFn, "ssh", args, { timeoutMs: 5_000 });
+      await runProcess(this.spawnFn, "ssh", args, { timeoutMs: 5_000, env: this._spawnEnv() });
       return true;
     } catch {
       return false;
