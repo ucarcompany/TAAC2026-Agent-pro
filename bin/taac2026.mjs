@@ -104,6 +104,10 @@ const commands = {
     script: "scripts/submit-escalate.mjs",
     description: "Quota state machine: candidate → local/compliance/quota/human/dry-run gates → submitted (M7).",
   },
+  errors: {
+    script: "scripts/error-tools.mjs",
+    description: "Error knowledge base (ingest/triage/apply-patch/list/verify) — M8 error-doctor / KB pipeline.",
+  },
 };
 
 const submitHelperActions = new Set(["doctor", "verify"]);

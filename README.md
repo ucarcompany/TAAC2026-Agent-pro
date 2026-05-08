@@ -78,7 +78,16 @@
 - 状态文件：`taiji-output/state/submits/<plan-id>/{quota-state.json, decisions/<gate>-<ts>.json}` + `events.ndjson` append。
 - `.claude/skills/submit-escalate/SKILL.md`（`disable-model-invocation: true`）。
 
-### M7–M8（设计已就绪，未实现）
+### M8 — error-doctor + KB（已落地）
+
+- 错误指纹（`scripts/_error-fingerprint.mjs`）：normalize 时间戳 / 路径 / 设备索引 / pid / 内存量 / tensor shape，从 Python 与 Node 两种 traceback 提 top-3 frame，按 auth → quota → network → gpu → cos → submit-api → eval-api → data → model → optimizer 优先级判 layer。**同一根因跨运行 sig 一致**，不同根因 sig 不同。
+- KB（`scripts/_error-kb.mjs`）：每条 entry HMAC 签名（canonical JSON）+ `timingSafeEqual` 验证，篡改即拒；upsert 累计 `occurrences`、并 plans_affected、保留 `first_seen` / 更新 `last_seen`。
+- `taac2026 errors ingest|triage|apply-patch|list|verify`：完整 5 个子命令；triage 命中 KB 直接返回 ready-made fix，未命中产 stub 给 `error-doctor` subagent；apply-patch 写 KB（HMAC）但**不**自动 `git apply`；verify 回填 patch 应用后下一轮成功 iter 的 val_auc / latency delta。
+- `.claude/agents/error-doctor.md`（model: sonnet, isolation: worktree, 零 Edit/Write/ssh/submit）+ `.claude/skills/error-triage/SKILL.md` + `.claude/skills/error-fix/SKILL.md`（后者 `disable-model-invocation: true`）。
+
+### M7（独立 PR，需真实官网调用，未实现）
+
+submit-escalate 状态机推进到 `submitted` / `eval_created` / `eval_completed` 真实官方调用——需要真实太极平台 cookie + 比赛官方 API 配额。所有上游闸（M0–M6）已就绪，M7 只是把 `submit_dry_run_verified → submitted` 这一步的 stub 换成真实调用。
 
 详见 [`taiji-output/reports/skill-expansion-design-2026-05-07.md`](taiji-output/reports/skill-expansion-design-2026-05-07.md)。后续每个里程碑独立 PR。
 

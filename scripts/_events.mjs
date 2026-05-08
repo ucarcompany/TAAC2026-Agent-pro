@@ -3,7 +3,7 @@
 // future PostToolUse hook; for now we just guarantee O_APPEND + flock-by-rename.
 
 import { createHash } from "node:crypto";
-import { open } from "node:fs/promises";
+import { mkdir, open } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +28,7 @@ export async function appendEvent({ event, actor, payload = {}, eventsPath = DEF
   const line = `${JSON.stringify(record)}\n`;
   // O_APPEND so concurrent writers cannot interleave within a line on POSIX
   // / NTFS. The Node fs/promises wrapper opens with the right flag.
+  await mkdir(path.dirname(eventsPath), { recursive: true });
   const handle = await open(eventsPath, "a");
   try {
     await handle.write(line, null, "utf8");

@@ -8,6 +8,109 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased] — M8 (2026-05-08)
+
+### Added — error-doctor + KB pipeline
+
+Implements milestone M8 of skill-expansion-design-2026-05-07.md §15.
+When a remote training iter or a Taiji submit/eval fails, this lets
+the operator (or `error-doctor` subagent) ingest the raw log, get a
+stable fingerprint, check a knowledge base for prior incidents, and
+record the eventual fix back to KB so the next occurrence is a 30-
+second decision instead of a fresh investigation.
+
+scripts/_error-fingerprint.mjs:
+- `normalizeMessage` strips out timestamps / hex addresses / abs paths /
+  device indices / pid+iter+epoch+seed / IPs / large numeric runs / hex
+  blobs / tensor shapes / memory amounts so the same root cause hashes
+  to the same string across runs.
+- `detectLayer` uses a priority-ordered keyword table to label the log:
+  auth → quota → network → gpu → cos → submit-api → eval-api → data →
+  model → optimizer. Transport-level signals (ETIMEDOUT, HTTP 5xx) win
+  over URL patterns so a `/taskmanagement` 5xx is correctly tagged
+  `network`, not `submit-api`.
+- `normalizeStackTrace` extracts the top-3 `module.func` frames from
+  Python or Node tracebacks (drops abs paths and line numbers).
+- `buildFingerprint` produces `{sig: "sha256:...64-hex", layer,
+  exception_class, normalized_message, top3_stack_frames_normalized}`.
+  Same root cause → same sig.
+
+scripts/_error-kb.mjs (HMAC-signed knowledge base):
+- `taiji-output/errors/kb/<sig-suffix>.json` per incident.
+- Every entry carries an HMAC computed from canonical-JSON of the
+  payload (key order independent). `getKbEntry` recomputes and uses
+  `timingSafeEqual` — any tamper raises immediately and the caller MUST
+  stop (no silent fallback to "miss").
+- `upsertKbEntry` increments occurrences, unions `plans_affected`,
+  preserves `first_seen`, updates `last_seen`, and re-signs.
+- `setVerification` lets `errors verify` write back the val_auc /
+  latency deltas observed after a patch was applied.
+- `listKbEntries` filters by layer + since.
+- `index.ndjson` is an append-only event ledger separate from the
+  state's events.ndjson — mainly for KB-specific audit replay.
+
+scripts/error-tools.mjs (taac2026 errors ...):
+- `errors ingest --event-id <id> --raw <path> [--source train|taiji-api]
+  [--plan-id ...] [--iter-id ...]` — copies the raw log to
+  `errors/raw/<event-id>/`, writes `context.json` and `fingerprint.json`,
+  appends `errors.ingested`.
+- `errors triage <event-id>` — KB hit returns the entry + recommendation;
+  KB miss writes a stub `triage.json` for the `error-doctor` subagent.
+  KB tamper aborts and writes `errors.kb.tamper_detected`.
+- `errors apply-patch --event-id <id> [--from-kb <sig>]
+  [--config-overrides <json>] [--retry-only] --execute --yes` —
+  upserts the KB entry with the supplied fix. We never `git apply` —
+  the patch.diff is recorded in KB but staged by the user. Audit event:
+  `errors.patch.applied`.
+- `errors list [--layer ...] [--since <iso|Nd>]`.
+- `errors verify --event-id <id> --val-auc-delta <n>
+  --latency-p95-delta-ms <n> --execute --yes` — fills the KB entry's
+  `verification` field after the next successful iter (so the next
+  occurrence's KB hit can show measured side-effect deltas).
+
+Skill / Subagent surfaces:
+- `.claude/agents/error-doctor.md` — `model: sonnet`, `isolation:
+  worktree`, `tools` whitelist Read/Glob/Grep + `Bash(taac2026 errors:*
+  *)` + read-only shell helpers (grep / tail / awk / head / wc).
+  `disallowedTools` blocks Edit, Write, WebFetch, every ssh/scp/rsync,
+  `taac2026 submit`, `taac2026 loop`, `taac2026 review issue`, all rm /
+  rm -rf, `git push`, `git apply`, `git reset --hard`. The subagent
+  produces `error-report.{md,json}` + (optional) `patch.diff`; the main
+  conversation Writes them; the user invokes the CLI to record.
+- `.claude/skills/error-triage/SKILL.md` — `/errors:triage` workflow.
+- `.claude/skills/error-fix/SKILL.md` (`disable-model-invocation:
+  true`) — Claude cannot self-apply; humans drive `/errors:fix`.
+
+### Fixed (incidental)
+
+- `scripts/_events.mjs::appendEvent` now `mkdir -p`s the parent of
+  `events.ndjson` before opening with `O_APPEND`. Caught by M8 tests
+  using fresh `taiji-output/state/` temp roots.
+
+### Tests (32 new)
+
+- `scripts/tests/error-fingerprint.test.mjs` (9 cases): normalization
+  rules, top-3 frame extraction (Python + Node styles), layer
+  detection priority, same-root-cause-same-sig across runs (CUDA OOM
+  with different paths/PIDs/sizes/devices), different-root-cause-
+  different-sig, sig format, statusJson.layer override.
+- `scripts/tests/error-kb.test.mjs` (11 cases): create / update /
+  occurrences / plans_affected union / null-on-absent /
+  HMAC-tamper-rejection / canonical-JSON key-order independence /
+  hmac-field excluded from signed bytes / list filter by layer /
+  setVerification round-trip / setVerification refuses tampered base /
+  invalid sig prefix.
+- `scripts/tests/error-tools.test.mjs` (12 cases): ingest writes
+  raw+context+fingerprint / two events same root cause same sig /
+  triage on miss returns instructions / apply-patch retry-only flow /
+  apply-patch then re-ingest hits KB (the headline M8 outcome) /
+  dry-run inertia / --execute requires --yes / list filter by layer /
+  verify round-trip / triage detects KB tamper.
+
+All 224 tests pass; 2 skip (Windows chmod).
+
+---
+
 ## [Unreleased] — M6 (2026-05-08)
 
 ### Added — submit-escalate dry-run state machine
